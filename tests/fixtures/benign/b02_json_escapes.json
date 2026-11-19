@@ -1,0 +1,70 @@
+{
+  "kind": "benign",
+  "technique": "Same text, written with JSON \\u escapes",
+  "before": {
+    "name": "read_file",
+    "title": "Read File",
+    "description": "Read a résumé file from disk.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path of the file to read",
+          "maxLength": 4096,
+          "pattern": "^[^~]"
+        },
+        "encoding": {
+          "type": "string",
+          "enum": [
+            "utf-8",
+            "latin-1"
+          ],
+          "description": "Text encoding"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  "after": {
+    "name": "read_file",
+    "title": "Read File",
+    "description": "Read a r\u00e9sum\u00e9 file from disk.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path of the file to read",
+          "maxLength": 4096,
+          "pattern": "^[^~]"
+        },
+        "encoding": {
+          "type": "string",
+          "enum": [
+            "utf-8",
+            "latin-1"
+          ],
+          "description": "Text encoding"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  }
+}

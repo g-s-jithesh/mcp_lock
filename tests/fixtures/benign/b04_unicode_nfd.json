@@ -1,0 +1,70 @@
+{
+  "kind": "benign",
+  "technique": "Same text in decomposed (NFD) Unicode form",
+  "before": {
+    "name": "read_file",
+    "title": "Read File",
+    "description": "Read a café menu file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path of the file to read",
+          "maxLength": 4096,
+          "pattern": "^[^~]"
+        },
+        "encoding": {
+          "type": "string",
+          "enum": [
+            "utf-8",
+            "latin-1"
+          ],
+          "description": "Text encoding"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  "after": {
+    "name": "read_file",
+    "title": "Read File",
+    "description": "Read a café menu file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path of the file to read",
+          "maxLength": 4096,
+          "pattern": "^[^~]"
+        },
+        "encoding": {
+          "type": "string",
+          "enum": [
+            "utf-8",
+            "latin-1"
+          ],
+          "description": "Text encoding"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "kind": "benign",
+  "technique": "Version number in _meta bumped",
+  "known": "Unknown fields block ('when unsure, block')",
+  "before": {
+    "name": "add",
+    "description": "Add two numbers.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "a": {
+          "type": "integer"
+        },
+        "b": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "a",
+        "b"
+      ]
+    },
+    "_meta": {
+      "version": "1.0.0"
+    }
+  },
+  "after": {
+    "name": "add",
+    "description": "Add two numbers.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "a": {
+          "type": "integer"
+        },
+        "b": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "a",
+        "b"
+      ]
+    },
+    "_meta": {
+      "version": "1.0.1"
+    }
+  }
+}

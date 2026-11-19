@@ -1,0 +1,24 @@
+{
+  "kind": "benign",
+  "technique": "Same definition, compact instead of pretty JSON",
+  "before": {
+    "name": "add",
+    "description": "Add two numbers.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "a": {
+          "type": "integer"
+        },
+        "b": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "a",
+        "b"
+      ]
+    }
+  },
+  "after": {"name":"add","description":"Add two numbers.","inputSchema":{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"]}}
+}

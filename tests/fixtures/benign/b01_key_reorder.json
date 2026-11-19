@@ -1,0 +1,70 @@
+{
+  "kind": "benign",
+  "technique": "Server serialises keys in a different order",
+  "before": {
+    "name": "read_file",
+    "title": "Read File",
+    "description": "Read the complete contents of a file from disk. Only works within allowed directories.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path of the file to read",
+          "maxLength": 4096,
+          "pattern": "^[^~]"
+        },
+        "encoding": {
+          "type": "string",
+          "enum": [
+            "utf-8",
+            "latin-1"
+          ],
+          "description": "Text encoding"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  "after": {
+    "annotations": {
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchema": {
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "encoding": {
+          "description": "Text encoding",
+          "enum": [
+            "utf-8",
+            "latin-1"
+          ],
+          "type": "string"
+        },
+        "path": {
+          "pattern": "^[^~]",
+          "maxLength": 4096,
+          "description": "Path of the file to read",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "description": "Read the complete contents of a file from disk. Only works within allowed directories.",
+    "title": "Read File",
+    "name": "read_file"
+  }
+}

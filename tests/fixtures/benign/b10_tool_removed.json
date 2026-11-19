@@ -1,0 +1,24 @@
+{
+  "kind": "benign",
+  "technique": "Server drops a tool",
+  "before": {
+    "name": "add",
+    "description": "Add two numbers.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "a": {
+          "type": "integer"
+        },
+        "b": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "a",
+        "b"
+      ]
+    }
+  },
+  "after": null
+}

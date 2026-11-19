@@ -7,7 +7,7 @@ hides that tool and blocks calls to it until you re-approve it.
 
 Think `package-lock.json`, but for the tools your agent can call.
 
-> Status: early. Stdio servers work end to end; HTTP transport and the benchmark
+> Status: early. Stdio servers work end to end; HTTP transport, CI and releases
 > are still to come (see [Roadmap](#roadmap)).
 
 ## Why
@@ -120,6 +120,34 @@ In Claude Code, run `claude --debug` to see them.
 | A call fails with "mcp-lock blocked tool" | Same as above | The error message contains the exact `diff` and `approve` commands |
 | Lockfile path ends up mangled on Windows | Git Bash ate the backslashes | Use forward slashes: `--lock C:/path/to/mcp.lock` |
 
+## Benchmark
+
+`cargo run --example benchmark` replays a corpus of before/after tool definitions:
+23 attacks (`tests/fixtures/attacks/`, each a benign definition and its poisoned twin) and
+15 harmless updates (`tests/fixtures/benign/`), against several policies:
+
+| Policy | Attacks caught | Benign changes blocked |
+|---|---|---|
+| raw-hash: any byte change blocks | 23/23 (100%) | 14/15 (93%) |
+| canonical-hash: any change after canonicalization blocks | 23/23 (100%) | 7/15 (47%) |
+| **mcp-lock** (default) | **22/23 (96%)** | **5/15 (33%)** |
+| mcp-lock-text: also block new parameters that carry text | 23/23 (100%) | 6/15 (40%) |
+| mcp-lock-strict: block every change, including warnings | 23/23 (100%) | 7/15 (47%) |
+
+- Attacks covered: hidden `<IMPORTANT>` instructions, tool shadowing, semantic rug pulls,
+  zero-width / bidi / Unicode-tag smuggling, whitespace hiding, lookalike names, annotation
+  flips, loosened constraints, poisoned parameter descriptions and defaults, and more.
+- The default policy's one miss is a **new optional parameter whose description carries the
+  instruction**: optional parameters only warn. `mcp-lock-text` closes that gap for one extra
+  false alarm.
+- The benign changes every mcp-lock policy blocks are by design: new tools, and any edit to
+  description text (where poisoning lives), unknown fields, or constraints.
+
+**Caveat:** the corpus is small and written by the authors of this tool. The numbers show what
+the classifier does on these cases, not a real-world detection rate. More cases are welcome:
+add a JSON file to either folder; `tests/corpus.rs` checks that the default policy's results
+match what the corpus documents.
+
 ## Prior art
 
 Tool pinning isn't new: [mcp-scan](https://github.com/invariantlabs-ai/mcp-scan) (Invariant),
@@ -128,7 +156,7 @@ on:
 
 - **Canonicalization + severity classification**: fewer false alarms than hashing raw bytes,
   while still catching real attacks.
-- **A measurable benchmark** (in progress): detection rate vs false-alarm rate on an attack corpus.
+- **A measurable benchmark** ([above](#benchmark)): detection rate vs false-alarm rate on an attack corpus.
 - **A small, transport-agnostic Rust core**, shipped as a single static binary.
 
 ## Roadmap
@@ -138,7 +166,7 @@ on:
 - [x] Lockfile, `approve`, `status`
 - [x] Classify + enforce
 - [x] `mcp-lock diff`: readable, coloured diff of what changed
-- [ ] Benchmark: attack corpus, detection and false-alarm rates
+- [x] Benchmark: attack corpus, detection and false-alarm rates
 - [ ] CI, demo, release binaries
 - [ ] Streamable HTTP transport
 

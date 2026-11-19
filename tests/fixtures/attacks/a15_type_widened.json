@@ -1,0 +1,45 @@
+{
+  "kind": "attack",
+  "technique": "Parameter type widened from integer to integer-or-string",
+  "before": {
+    "name": "add",
+    "description": "Add two numbers.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "a": {
+          "type": "integer"
+        },
+        "b": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "a",
+        "b"
+      ]
+    }
+  },
+  "after": {
+    "name": "add",
+    "description": "Add two numbers.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "a": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        },
+        "b": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "a",
+        "b"
+      ]
+    }
+  }
+}
