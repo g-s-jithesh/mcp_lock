@@ -78,7 +78,7 @@ impl Interceptor {
         match msg["method"].as_str() {
             Some("tools/list") => {
                 if let Some(id) = msg.get("id") {
-                    self.pending_lists.insert(id.to_string());
+                    self.pending_lists.insert(id_key(id));
                 }
                 Action::Forward
             }
@@ -88,13 +88,47 @@ impl Interceptor {
     }
 
     /// A message from the server, on its way to the client.
+    ///
+    /// Filtered: responses to our pending `tools/list` ids, and, to be safe, *any* response
+    /// whose result carries a `tools` array, whatever its id. Batches are checked per element.
     pub fn on_server(&mut self, msg: &Value) -> Action {
-        let is_list_response = msg.get("method").is_none()
-            && msg
-                .get("id")
-                .is_some_and(|id| self.pending_lists.remove(&id.to_string()));
-        if is_list_response {
+        if let Value::Array(batch) = msg {
+            return self.on_server_batch(batch);
+        }
+        // A response is anything with a result or error and no string `method`
+        // (`"method": null` counts as absent, as typed JSON-RPC parsers treat it).
+        let is_response = !msg["method"].is_string()
+            && (msg.get("result").is_some() || msg.get("error").is_some());
+        if !is_response {
+            return Action::Forward;
+        }
+        // Only a real response uses up the pending id.
+        let was_pending = msg
+            .get("id")
+            .is_some_and(|id| self.pending_lists.remove(&id_key(id)));
+        if was_pending || msg["result"]["tools"].is_array() {
             self.filter_list(msg)
+        } else {
+            Action::Forward
+        }
+    }
+
+    /// Batches were dropped from MCP, but if a server sends one, check each element.
+    fn on_server_batch(&mut self, batch: &[Value]) -> Action {
+        let mut changed = false;
+        let mut out = Vec::with_capacity(batch.len());
+        for msg in batch {
+            match self.on_server(msg) {
+                Action::Forward => out.push(msg.clone()),
+                Action::Replace(v) => {
+                    changed = true;
+                    out.push(v);
+                }
+                Action::Reply(_) | Action::Drop => changed = true,
+            }
+        }
+        if changed {
+            Action::Replace(Value::Array(out))
         } else {
             Action::Forward
         }
@@ -211,6 +245,18 @@ impl Interceptor {
     }
 }
 
+/// Key for matching a response id to a request id the way JavaScript clients do:
+/// numbers by value (`1` == `1.0` == `1e0`), strings by text, and never `1` == `"1"`.
+fn id_key(id: &Value) -> String {
+    match id {
+        Value::Number(n) => n
+            .as_f64()
+            .map_or_else(|| format!("n:{n}"), |f| format!("n:{f}")),
+        Value::String(s) => format!("s:{s}"),
+        other => other.to_string(),
+    }
+}
+
 fn with_tools(msg: &Value, tools: Vec<Value>) -> Value {
     let mut out = msg.clone();
     out["result"]["tools"] = Value::Array(tools);
@@ -314,19 +360,65 @@ mod tests {
         assert_eq!(action, Action::Replace(list_response(1, &[])));
     }
 
+    fn hidden() -> Action {
+        Action::Replace(list_response(1, &[]))
+    }
+
+    fn pending_list(i: &mut Interceptor, id: Value) {
+        i.on_client(&json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"}));
+    }
+
     #[test]
-    fn only_matching_response_ids_are_filtered() {
+    fn any_response_carrying_tools_is_filtered() {
+        // Issue #2.4: a reply under an unexpected id must not smuggle tools through.
         let mut i = Interceptor::new(Ok(None), "hint".into());
-        // A response to some other request that happens to contain `tools` is left alone.
         assert_eq!(
             i.on_server(&list_response(7, &[tool("Echo.")])),
+            Action::Replace(list_response(7, &[]))
+        );
+    }
+
+    #[test]
+    fn method_null_is_still_a_response() {
+        // Issue #2.1: typed JSON-RPC parsers treat `"method": null` as absent.
+        let mut i = Interceptor::new(Ok(None), "hint".into());
+        pending_list(&mut i, json!(1));
+        let mut msg = list_response(1, &[tool("Echo.")]);
+        msg["method"] = Value::Null;
+        let mut expected = list_response(1, &[]);
+        expected["method"] = Value::Null;
+        assert_eq!(i.on_server(&msg), Action::Replace(expected));
+    }
+
+    #[test]
+    fn numerically_equal_ids_match() {
+        // Issue #2.2: JavaScript treats 1 and 1.0 as the same id.
+        assert_eq!(id_key(&json!(1)), id_key(&json!(1.0)));
+        assert_ne!(id_key(&json!(1)), id_key(&json!("1")));
+    }
+
+    #[test]
+    fn non_responses_do_not_consume_the_pending_id() {
+        // Issue #2.3: a stray message with our id must not use up the pending entry.
+        let mut i = Interceptor::new(Ok(approved(&[tool("Echo.")])), "hint".into());
+        pending_list(&mut i, json!(1));
+        assert_eq!(
+            i.on_server(&json!({"jsonrpc": "2.0", "id": 1})),
             Action::Forward
         );
-        // String id "1" is not the same request as numeric id 1.
-        i.on_client(&json!({"jsonrpc": "2.0", "id": "1", "method": "tools/list"}));
+        assert_eq!(i.on_server(&list_response(1, &[tool("Evil.")])), hidden());
+    }
+
+    #[test]
+    fn server_batches_are_filtered_element_by_element() {
+        // Issue #2.4: a batch must not carry an unchecked tools/list response.
+        let mut i = Interceptor::new(Ok(None), "hint".into());
+        pending_list(&mut i, json!(1));
+        let ping = json!({"jsonrpc": "2.0", "id": 9, "result": {}});
+        let batch = json!([ping.clone(), list_response(1, &[tool("Echo.")])]);
         assert_eq!(
-            i.on_server(&list_response(1, &[tool("Echo.")])),
-            Action::Forward
+            i.on_server(&batch),
+            Action::Replace(json!([ping, list_response(1, &[])]))
         );
     }
 
