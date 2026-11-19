@@ -1,7 +1,9 @@
 use anyhow::{bail, Context};
 use clap::{Args, Parser, Subcommand};
+use mcp_lock::classify::{check, Severity};
 use mcp_lock::fingerprint::{fingerprint_tools, Pinned};
-use mcp_lock::lockfile::{self, Drift, Lockfile};
+use mcp_lock::interceptor::Interceptor;
+use mcp_lock::lockfile::{self, Lockfile};
 use mcp_lock::transport::stdio::StdioTransport;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -24,11 +26,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Run as a proxy in front of a stdio MCP server: `mcp-lock run -- <server cmd> [args...]`
-    Run {
-        /// The server command and its arguments.
-        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
-        server: Vec<String>,
-    },
+    /// Hides tools that are new or changed since approval and rejects calls to them.
+    Run(ServerArgs),
     /// Show how the server's tools differ from the lockfile. Changes nothing.
     /// Exits 1 if anything drifted.
     Status(ServerArgs),
@@ -62,9 +61,22 @@ async fn main() -> anyhow::Result<ExitCode> {
         .init();
 
     match Cli::parse().command {
-        Cmd::Run { server } => {
-            let mut transport = spawn(&server)?;
-            mcp_lock::proxy::run(&mut transport, tokio::io::stdin(), tokio::io::stdout()).await?;
+        Cmd::Run(args) => {
+            // A lockfile error doesn't stop the session: the interceptor hides every tool
+            // (fail closed) and says why on stderr.
+            let id = lockfile::server_id(&args.server);
+            let lock = Lockfile::load(&args.lock)
+                .map(|mut lock| lock.servers.remove(&id))
+                .map_err(|e| e.to_string());
+            let mut interceptor = Interceptor::new(lock, approve_hint(&args));
+            let mut transport = spawn(&args.server)?;
+            mcp_lock::proxy::run(
+                &mut transport,
+                &mut interceptor,
+                tokio::io::stdin(),
+                tokio::io::stdout(),
+            )
+            .await?;
             let status = transport.wait().await?;
             // Propagate the server's exit code; 1 if it was killed by a signal.
             Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
@@ -78,19 +90,23 @@ async fn status(args: ServerArgs) -> anyhow::Result<ExitCode> {
     let lock = Lockfile::load(&args.lock)?;
     let (label, current) = snapshot(&args.server).await?;
     let id = lockfile::server_id(&args.server);
-    let drift = lock.drift(&id, &current);
+    let verdicts = check(lock.servers.get(&id), &current);
 
     println!("{label} ({id})");
-    for (name, d) in &drift {
-        let tag = match d {
-            Drift::Unchanged => "ok",
-            Drift::Changed => "CHANGED",
-            Drift::New => "NEW",
-            Drift::Removed => "removed",
+    for (name, verdict) in &verdicts {
+        let tag = match verdict.severity {
+            Severity::None => "ok",
+            Severity::Warn => "WARN",
+            Severity::New => "NEW",
+            Severity::Block => "BLOCK",
         };
-        println!("  {tag:<8} {name}");
+        if verdict.reasons.is_empty() {
+            println!("  {tag:<6} {name}");
+        } else {
+            println!("  {tag:<6} {name}: {}", verdict.reasons.join("; "));
+        }
     }
-    let clean = drift.values().all(|d| *d == Drift::Unchanged);
+    let clean = verdicts.values().all(|v| v.severity == Severity::None);
     Ok(if clean {
         ExitCode::SUCCESS
     } else {
@@ -125,6 +141,15 @@ async fn snapshot(server: &[String]) -> anyhow::Result<(String, BTreeMap<String,
     let pinned = fingerprint_tools(&snap.tools)?;
     let label = snap.server_name.unwrap_or_else(|| server[0].clone());
     Ok((label, pinned))
+}
+
+/// The command a user runs to approve this server, shown when tools are blocked.
+fn approve_hint(args: &ServerArgs) -> String {
+    format!(
+        "mcp-lock approve --lock {} -- {}",
+        args.lock.display(),
+        args.server.join(" ")
+    )
 }
 
 fn spawn(server: &[String]) -> anyhow::Result<StdioTransport> {
