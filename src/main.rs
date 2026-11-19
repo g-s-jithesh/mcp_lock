@@ -26,8 +26,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run as a proxy in front of a stdio MCP server: `mcp-lock run -- <server cmd> [args...]`
-    /// Hides tools that are new or changed since approval and rejects calls to them.
+    /// Proxy a stdio MCP server, hiding tools that are new or changed since approval
+    /// and rejecting calls to them.
     Run(ServerArgs),
     /// Show how the server's tools differ from the lockfile. Changes nothing.
     /// Exits 1 if anything drifted.
