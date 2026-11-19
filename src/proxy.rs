@@ -4,10 +4,12 @@
 //! as the original bytes, so a session with no drift is byte-for-byte transparent.
 
 use crate::interceptor::{Action, Interceptor};
-use crate::transport::{line_writer, Transport};
+use crate::transport::{
+    line_writer, LineReader, LineSender, Transport, MAX_MESSAGE_BYTES, MAX_QUEUED_BYTES,
+};
 use serde_json::Value;
 use std::io;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Pump messages between a client (`client_in`/`client_out`) and `server` until the
 /// server closes. When the client closes its side, the server's input is closed too and
@@ -23,19 +25,19 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let mut from_client = BufReader::new(client_in).split(b'\n');
-    let (to_client, client_writer) = line_writer(client_out);
+    let mut from_client = LineReader::new(client_in, MAX_MESSAGE_BYTES);
+    let (to_client, client_writer) = line_writer(client_out, MAX_QUEUED_BYTES);
     let mut client_open = true;
 
     loop {
         // `select!` waits on both sides at once and runs the branch that's ready first.
         // The other branch's future is dropped, which is why both reads must be cancel-safe.
         tokio::select! {
-            msg = from_client.next_segment(), if client_open => match msg? {
+            msg = from_client.next_line(), if client_open => match msg? {
                 Some(msg) => match decide(&msg, |v| interceptor.on_client(v)) {
-                    Action::Forward => send_to_server(server, msg),
-                    Action::Replace(v) => send_to_server(server, v.to_string().into_bytes()),
-                    Action::Reply(v) => send_to_client(&to_client, v.to_string().into_bytes()),
+                    Action::Forward => send_to_server(server, msg)?,
+                    Action::Replace(v) => send_to_server(server, v.to_string().into_bytes())?,
+                    Action::Reply(v) => send_to_client(&to_client, v.to_string().into_bytes())?,
                     Action::Drop => {}
                 },
                 None => {
@@ -46,8 +48,8 @@ where
             },
             msg = server.recv() => match msg? {
                 Some(msg) => match decide(&msg, |v| interceptor.on_server(v)) {
-                    Action::Forward => send_to_client(&to_client, msg),
-                    Action::Replace(v) => send_to_client(&to_client, v.to_string().into_bytes()),
+                    Action::Forward => send_to_client(&to_client, msg)?,
+                    Action::Replace(v) => send_to_client(&to_client, v.to_string().into_bytes())?,
                     // The interceptor never answers the server itself; treat as dropped.
                     Action::Reply(_) | Action::Drop => {}
                 },
@@ -78,15 +80,28 @@ fn decide(raw: &[u8], inspect: impl FnOnce(&Value) -> Action) -> Action {
     }
 }
 
-fn send_to_server<T: Transport>(server: &mut T, msg: Vec<u8>) {
-    if let Err(e) = server.send(msg) {
-        tracing::warn!("dropping client message: {e}");
+/// Queue a message for the server. A closed server input is only logged (the server is
+/// going away, and the end of its output ends the session); a stalled server is fatal.
+fn send_to_server<T: Transport>(server: &mut T, msg: Vec<u8>) -> io::Result<()> {
+    match server.send(msg) {
+        Err(e) if e.kind() == io::ErrorKind::OutOfMemory => Err(e),
+        Err(e) => {
+            tracing::warn!("dropping client message: {e}");
+            Ok(())
+        }
+        Ok(()) => Ok(()),
     }
 }
 
-fn send_to_client(to_client: &tokio::sync::mpsc::UnboundedSender<Vec<u8>>, msg: Vec<u8>) {
-    if to_client.send(msg).is_err() {
-        tracing::warn!("client output closed; dropping message");
+/// Queue a message for the client. Same rules as [`send_to_server`].
+fn send_to_client(to_client: &LineSender, msg: Vec<u8>) -> io::Result<()> {
+    match to_client.send(msg) {
+        Err(e) if e.kind() == io::ErrorKind::OutOfMemory => Err(e),
+        Err(e) => {
+            tracing::warn!("dropping message for the client: {e}");
+            Ok(())
+        }
+        Ok(()) => Ok(()),
     }
 }
 

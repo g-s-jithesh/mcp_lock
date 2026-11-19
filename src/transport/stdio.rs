@@ -1,21 +1,19 @@
 //! Stdio transport: spawn the server as a child process and exchange newline-delimited
 //! JSON-RPC over its stdin/stdout. The child's stderr is inherited, so its logs reach ours.
 
-use super::{line_writer, Transport};
+use super::{line_writer, LineReader, LineSender, Transport, MAX_MESSAGE_BYTES, MAX_QUEUED_BYTES};
 use std::io;
 use std::process::{ExitStatus, Stdio};
-use tokio::io::{AsyncBufReadExt, BufReader, Split};
 use tokio::process::{Child, ChildStdout, Command};
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 /// A spawned MCP server speaking JSON-RPC over stdio.
 pub struct StdioTransport {
     child: Child,
     /// `None` after [`Transport::close`]; dropping the sender closes the child's stdin.
-    to_server: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    to_server: Option<LineSender>,
     writer: JoinHandle<io::Result<()>>,
-    from_server: Split<BufReader<ChildStdout>>,
+    from_server: LineReader<ChildStdout>,
 }
 
 impl StdioTransport {
@@ -32,12 +30,12 @@ impl StdioTransport {
         // piped stdio, so both are present.
         let stdin = child.stdin.take().ok_or_else(|| missing("stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| missing("stdout"))?;
-        let (to_server, writer) = line_writer(stdin);
+        let (to_server, writer) = line_writer(stdin, MAX_QUEUED_BYTES);
         Ok(Self {
             child,
             to_server: Some(to_server),
             writer,
-            from_server: BufReader::new(stdout).split(b'\n'),
+            from_server: LineReader::new(stdout, MAX_MESSAGE_BYTES),
         })
     }
 
@@ -53,13 +51,12 @@ impl StdioTransport {
 
 impl Transport for StdioTransport {
     fn send(&mut self, msg: Vec<u8>) -> io::Result<()> {
-        let tx = self.to_server.as_ref().ok_or_else(closed)?;
-        tx.send(msg).map_err(|_| closed())
+        self.to_server.as_ref().ok_or_else(closed)?.send(msg)
     }
 
     async fn recv(&mut self) -> io::Result<Option<Vec<u8>>> {
-        // `Split::next_segment` is cancel-safe, as `Transport::recv` requires.
-        self.from_server.next_segment().await
+        // `LineReader::next_line` is cancel-safe, as `Transport::recv` requires.
+        self.from_server.next_line().await
     }
 
     fn close(&mut self) {
