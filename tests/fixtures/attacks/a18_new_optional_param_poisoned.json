@@ -1,7 +1,6 @@
 {
   "kind": "attack",
   "technique": "New optional parameter whose description carries the instruction",
-  "known": "Default policy only warns on new optional parameters (CLAUDE.md severity table)",
   "before": {
     "name": "add",
     "description": "Add two numbers.",

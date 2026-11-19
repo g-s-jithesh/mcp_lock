@@ -50,21 +50,17 @@ pub enum Policy {
     RawHash,
     /// Any difference after canonicalization blocks (mcp-lock's hash, no classifier).
     CanonicalHash,
-    /// mcp-lock today: block on `New` / `Block` severity.
+    /// mcp-lock's default: block on `New` / `Block` severity.
     McpLock,
-    /// Like `McpLock`, but a new optional parameter that carries text the model reads
-    /// (description, title, default, examples) blocks too.
-    McpLockText,
     /// Block on any change at all, including `Warn`.
     McpLockStrict,
 }
 
 impl Policy {
-    pub const ALL: [Policy; 5] = [
+    pub const ALL: [Policy; 4] = [
         Policy::RawHash,
         Policy::CanonicalHash,
         Policy::McpLock,
-        Policy::McpLockText,
         Policy::McpLockStrict,
     ];
 
@@ -73,7 +69,6 @@ impl Policy {
             Policy::RawHash => "raw-hash",
             Policy::CanonicalHash => "canonical-hash",
             Policy::McpLock => "mcp-lock (default)",
-            Policy::McpLockText => "mcp-lock-text",
             Policy::McpLockStrict => "mcp-lock-strict",
         }
     }
@@ -95,34 +90,8 @@ impl Policy {
             Policy::RawHash => unreachable!("handled above"),
             Policy::CanonicalHash => fingerprint(&before) != fingerprint(&after),
             Policy::McpLock => severity.hides(),
-            Policy::McpLockText => {
-                severity.hides()
-                    || (severity == Severity::Warn && new_param_carries_text(&before, &after))
-            }
             Policy::McpLockStrict => severity >= Severity::Warn,
         })
-    }
-}
-
-/// Does any parameter added in `after` carry text the model would read?
-fn new_param_carries_text(before: &Value, after: &Value) -> bool {
-    let old = &before["inputSchema"]["properties"];
-    after["inputSchema"]["properties"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter(|(name, _)| old.get(name.as_str()).is_none())
-        .any(|(_, schema)| has_text(schema))
-}
-
-fn has_text(value: &Value) -> bool {
-    const TEXT_KEYS: [&str; 4] = ["description", "title", "default", "examples"];
-    match value {
-        Value::Object(map) => map
-            .iter()
-            .any(|(k, v)| TEXT_KEYS.contains(&k.as_str()) || has_text(v)),
-        Value::Array(items) => items.iter().any(has_text),
-        _ => false,
     }
 }
 

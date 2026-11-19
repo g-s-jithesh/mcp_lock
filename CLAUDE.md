@@ -107,7 +107,8 @@ Hash a normalized form, not raw bytes:
 | Change | Severity | Default action |
 |---|---|---|
 | Key reorder, formatting only | None | Silent |
-| New optional parameter | Warn | Allow, log on stderr |
+| New optional parameter with no text (no `description`/`title`/`default`/`examples`) | Warn | Allow, log on stderr |
+| New optional parameter that carries text | Block | Hide + reject calls |
 | New tool not in lock | New | Hidden until approved |
 | Description text changed | Block | Hide + reject calls |
 | Constraint removed/loosened (`required`, `enum`, `maxLength`, `pattern`, type widened) | Block | Hide + reject calls |
@@ -117,6 +118,10 @@ Hash a normalized form, not raw bytes:
 | Zero-width / bidi control chars added | Block | Hide + reject calls |
 
 When unsure how to classify a change, choose **Block** and add a test case documenting it.
+
+Why text-carrying optional parameters block: the model reads parameter descriptions, so they
+can carry instructions (benchmark case `a18`). Warning on them missed that attack; blocking
+costs one extra false alarm on the benchmark (`b09`). Decided 2026-11-19 from benchmark data.
 
 ### Lockfile format (mcp.lock)
 

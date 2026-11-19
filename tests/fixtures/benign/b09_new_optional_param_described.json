@@ -1,6 +1,7 @@
 {
   "kind": "benign",
   "technique": "New optional parameter with an ordinary description",
+  "known": "New parameters that carry text block: their description is read by the model, like a18",
   "before": {
     "name": "read_file",
     "title": "Read File",
