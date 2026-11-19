@@ -263,3 +263,25 @@ fn run_exits_even_if_the_server_ignores_stdin_eof() {
         "mcp-lock run still running 20s after the client closed stdin"
     );
 }
+
+#[test]
+fn status_fails_for_a_server_that_was_never_approved_even_with_no_tools() {
+    // Issue #12.3
+    let lock = fresh_lock("unapproved_empty");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mcp-lock"));
+    cmd.args(["status", "--lock"])
+        .arg(&lock)
+        .args(["--", python()])
+        .arg(format!(
+            "{}/tests/fake_server.py",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .env("FAKE_NO_TOOLS", "1");
+    let out = cmd.output().expect("run status");
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("not in the lockfile"),
+        "{}",
+        stdout(&out)
+    );
+}

@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::FAILURE);
             };
             // Propagate the server's exit code; 1 if it was killed by a signal.
-            Ok(ExitCode::from(status?.code().unwrap_or(1) as u8))
+            Ok(ExitCode::from(exit_byte(status?.code().unwrap_or(1))))
         }
         Cmd::Status(args) => status(args).await,
         Cmd::Diff { tool, server } => diff(server, tool.as_deref()).await,
@@ -106,9 +106,13 @@ async fn status(args: ServerArgs) -> anyhow::Result<ExitCode> {
     let lock = Lockfile::load(&args.lock)?;
     let (label, current) = snapshot(&args.server).await?;
     let id = lockfile::server_id(&args.server);
-    let verdicts = check(lock.servers.get(&id), &current);
+    let locked = lock.servers.get(&id);
+    let verdicts = check(locked, &current);
 
     println!("{label} ({id})");
+    if locked.is_none() {
+        print_not_approved(&args);
+    }
     for (name, verdict) in &verdicts {
         // Tool names and reasons come from the server: escape them before printing.
         let (tag, name) = (tag(verdict.severity), visible(name));
@@ -121,8 +125,9 @@ async fn status(args: ServerArgs) -> anyhow::Result<ExitCode> {
             );
         }
     }
+    // A server that was never approved is drift, even if it has no tools right now.
     Ok(exit_code(
-        verdicts.values().all(|v| v.severity == Severity::None),
+        locked.is_some() && verdicts.values().all(|v| v.severity == Severity::None),
     ))
 }
 
@@ -144,7 +149,9 @@ async fn diff(args: ServerArgs, only: Option<&str>) -> anyhow::Result<ExitCode> 
             .map(|(name, _)| name)
             .collect(),
     };
-    if names.is_empty() {
+    if locked.is_none() {
+        print_not_approved(&args);
+    } else if names.is_empty() {
         println!("no changes");
     }
 
@@ -177,10 +184,27 @@ async fn diff(args: ServerArgs, only: Option<&str>) -> anyhow::Result<ExitCode> 
         println!();
     }
     Ok(exit_code(
-        names
-            .iter()
-            .all(|n| verdicts[*n].severity == Severity::None),
+        locked.is_some()
+            && names
+                .iter()
+                .all(|n| verdicts[*n].severity == Severity::None),
     ))
+}
+
+fn print_not_approved(args: &ServerArgs) {
+    println!(
+        "  server is not in the lockfile; approve it with: mcp-lock approve {}",
+        cli_args(args)
+    );
+}
+
+/// The process exit code for a child's exit code. Exit codes are a byte on most systems,
+/// so keep the low byte, but never let a failure (e.g. 256) wrap around to 0 = success.
+fn exit_byte(code: i32) -> u8 {
+    match (code & 0xff) as u8 {
+        0 if code != 0 => 1,
+        byte => byte,
+    }
 }
 
 /// Short label for a severity, as shown by `status` and `diff`.
@@ -247,4 +271,19 @@ fn spawn(server: &[String]) -> anyhow::Result<StdioTransport> {
         bail!("missing server command");
     };
     StdioTransport::spawn(program, args).with_context(|| format!("failed to start `{program}`"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exit_byte;
+
+    #[test]
+    fn nonzero_exit_codes_never_become_success() {
+        // Issue #12.1: `256 as u8` is 0.
+        assert_eq!(exit_byte(0), 0);
+        assert_eq!(exit_byte(3), 3);
+        assert_eq!(exit_byte(256), 1);
+        assert_eq!(exit_byte(512 + 7), 7);
+        assert_eq!(exit_byte(-1073741819), 5); // 0xC0000005 access violation on Windows
+    }
 }

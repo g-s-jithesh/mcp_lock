@@ -66,7 +66,11 @@ pub async fn list_tools<T: Transport>(transport: &mut T) -> Result<Snapshot, Cli
             Value::Array(page_tools) => tools.extend(page_tools),
             _ => return Err(ClientError::NoToolsArray),
         }
-        cursor = result.get("nextCursor").filter(|c| !c.is_null()).cloned();
+        // Missing, null and "" all end the listing ("" is falsy to JavaScript clients).
+        cursor = result
+            .get("nextCursor")
+            .filter(|c| !c.is_null() && c.as_str() != Some(""))
+            .cloned();
         if cursor.is_none() {
             let server_name = init["serverInfo"]["name"].as_str().map(str::to_owned);
             return Ok(Snapshot { server_name, tools });
@@ -108,5 +112,35 @@ async fn request<T: Transport>(
             });
         }
         return Ok(msg["result"].take());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    /// Replies with canned responses in order, ignoring what is sent.
+    struct Scripted(VecDeque<Value>);
+
+    impl Transport for Scripted {
+        fn send(&mut self, _msg: Vec<u8>) -> io::Result<()> {
+            Ok(())
+        }
+        async fn recv(&mut self) -> io::Result<Option<Vec<u8>>> {
+            Ok(self.0.pop_front().map(|v| v.to_string().into_bytes()))
+        }
+        fn close(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn empty_next_cursor_ends_the_listing() {
+        // Issue #12.2: `""` used to be followed as a cursor, looping until TooManyPages.
+        let mut server = Scripted(VecDeque::from([
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "s"}}}),
+            json!({"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "a"}], "nextCursor": ""}}),
+        ]));
+        let snapshot = list_tools(&mut server).await.expect("one page");
+        assert_eq!(snapshot.tools.len(), 1);
     }
 }

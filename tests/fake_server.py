@@ -29,6 +29,11 @@ TOOLS = [
 ]
 
 
+# A server with no tools at all (issue #12).
+if os.environ.get("FAKE_NO_TOOLS"):
+    TOOLS = []
+
+
 def result(method, params):
     if method == "initialize":
         return {
