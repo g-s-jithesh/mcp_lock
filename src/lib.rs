@@ -2,6 +2,8 @@
 //! definitions drift.
 
 pub mod canonical;
+pub mod client;
 pub mod fingerprint;
+pub mod lockfile;
 pub mod proxy;
 pub mod transport;

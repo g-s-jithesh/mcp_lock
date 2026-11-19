@@ -1,17 +1,18 @@
 """Tiny fake MCP server for tests: newline-delimited JSON-RPC over stdio.
 
 Answers initialize, tools/list, tools/call and ping; ignores notifications.
-Usage: fake_server.py [DESCRIPTION]  (DESCRIPTION overrides the `echo` tool's description,
-so tests can simulate a server changing a tool between runs.)
+Set FAKE_DESCRIPTION to override the `echo` tool's description, so tests can simulate a
+server changing a tool between runs (an env var, so the command line and server id stay put).
 """
 import json
+import os
 import sys
 
 # UTF-8 and no \r\n translation, whatever the platform's pipe defaults are.
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8", newline="\n")
 
-DESCRIPTION = sys.argv[1] if len(sys.argv) > 1 else "Echo the input text back."
+DESCRIPTION = os.environ.get("FAKE_DESCRIPTION", "Echo the input text back.")
 
 TOOLS = [
     {

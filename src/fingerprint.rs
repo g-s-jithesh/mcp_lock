@@ -6,11 +6,9 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-/// Why a `tools/list` result could not be fingerprinted. Callers should fail closed.
+/// Why a list of tools could not be fingerprinted. Callers should fail closed.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum FingerprintError {
-    #[error("tools/list result has no `tools` array")]
-    NoToolsArray,
     #[error("tool at index {0} has no string `name`")]
     MissingName(usize),
     /// Two tools with one name: a client may pick either, so this could be shadowing.
@@ -18,11 +16,17 @@ pub enum FingerprintError {
     DuplicateName(String),
 }
 
-/// Fingerprint one tool definition: `"sha256:<hex>"` over its canonical JSON.
-/// The whole object is hashed (name, description, schemas, annotations, everything).
-pub fn fingerprint(tool: &Value) -> String {
-    let digest = Sha256::digest(canonicalize(tool).to_string().as_bytes());
-    digest
+/// A tool's fingerprint plus the canonical definition it was computed from
+/// (stored in the lockfile so drift can be diffed later).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pinned {
+    pub hash: String,
+    pub definition: Value,
+}
+
+/// `"sha256:<hex>"` of `bytes`.
+pub fn sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
         .iter()
         .fold(String::from("sha256:"), |mut out, byte| {
             // Writing to a String can't fail, so ignoring the Result is fine.
@@ -31,18 +35,28 @@ pub fn fingerprint(tool: &Value) -> String {
         })
 }
 
-/// Fingerprint every tool in a `tools/list` result (the JSON-RPC `result` object).
-/// Returns tool name -> fingerprint.
-pub fn fingerprint_tools(result: &Value) -> Result<BTreeMap<String, String>, FingerprintError> {
-    let tools = result["tools"]
-        .as_array()
-        .ok_or(FingerprintError::NoToolsArray)?;
+/// Fingerprint one tool definition: `"sha256:<hex>"` over its canonical JSON.
+/// The whole object is hashed (name, description, schemas, annotations, everything).
+pub fn fingerprint(tool: &Value) -> String {
+    pin(tool).hash
+}
+
+fn pin(tool: &Value) -> Pinned {
+    let definition = canonicalize(tool);
+    Pinned {
+        hash: sha256(definition.to_string().as_bytes()),
+        definition,
+    }
+}
+
+/// Fingerprint every tool a server advertises. Returns tool name -> [`Pinned`].
+pub fn fingerprint_tools(tools: &[Value]) -> Result<BTreeMap<String, Pinned>, FingerprintError> {
     let mut out = BTreeMap::new();
     for (i, tool) in tools.iter().enumerate() {
         let name = tool["name"]
             .as_str()
             .ok_or(FingerprintError::MissingName(i))?;
-        if out.insert(name.to_owned(), fingerprint(tool)).is_some() {
+        if out.insert(name.to_owned(), pin(tool)).is_some() {
             return Err(FingerprintError::DuplicateName(name.to_owned()));
         }
     }
@@ -121,15 +135,15 @@ mod tests {
     #[test]
     fn rejects_malformed_lists() {
         use FingerprintError::*;
-        assert_eq!(fingerprint_tools(&json!({})), Err(NoToolsArray));
         assert_eq!(
-            fingerprint_tools(&json!({"tools": [{"name": "a"}, {"description": "x"}]})),
+            fingerprint_tools(&[json!({"name": "a"}), json!({"description": "x"})]),
             Err(MissingName(1))
         );
         assert_eq!(
-            fingerprint_tools(
-                &json!({"tools": [{"name": "a"}, {"name": "a", "description": "evil"}]})
-            ),
+            fingerprint_tools(&[
+                json!({"name": "a"}),
+                json!({"name": "a", "description": "evil"})
+            ]),
             Err(DuplicateName("a".into()))
         );
     }
@@ -138,10 +152,11 @@ mod tests {
     fn fingerprints_real_filesystem_server() {
         let raw = include_str!("../tests/fixtures/filesystem_tools_list.json");
         let response: Value = serde_json::from_str(raw).expect("fixture is JSON");
-        let hashes = fingerprint_tools(&response["result"]).expect("fixture is well formed");
+        let tools = response["result"]["tools"].as_array().expect("tools array");
+        let hashes = fingerprint_tools(tools).expect("fixture is well formed");
         assert_eq!(hashes.len(), 16);
         assert!(hashes.contains_key("read_text_file"));
         // Stable across runs: hashing the same input twice gives the same map.
-        assert_eq!(fingerprint_tools(&response["result"]), Ok(hashes));
+        assert_eq!(fingerprint_tools(tools), Ok(hashes));
     }
 }
