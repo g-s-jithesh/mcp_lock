@@ -19,17 +19,18 @@ const GREEN: &str = "32";
 pub fn render(old: Option<&Value>, new: Option<&Value>, color: bool) -> String {
     let (mut before, mut after) = (BTreeMap::new(), BTreeMap::new());
     if let Some(v) = old {
-        flatten(v, String::new(), &mut before);
+        flatten(v, Vec::new(), &mut before);
     }
     if let Some(v) = new {
-        flatten(v, String::new(), &mut after);
+        flatten(v, Vec::new(), &mut after);
     }
     let paint = |text: &str, code: &str| paint(text, code, color);
 
     let mut out = String::new();
-    let paths: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
-    for path in paths {
-        let line = match (before.get(path), after.get(path)) {
+    let paths: BTreeSet<&Path> = before.keys().chain(after.keys()).collect();
+    for segments in paths {
+        let path = display_path(segments);
+        let line = match (before.get(segments), after.get(segments)) {
             (Some(a), Some(b)) if a == b => continue,
             (Some(Value::String(a)), Some(Value::String(b))) => {
                 format!("~ {path}\n    {}", word_diff(a, b, color))
@@ -49,29 +50,64 @@ pub fn render(old: Option<&Value>, new: Option<&Value>, color: bool) -> String {
     out
 }
 
-/// Flatten objects (and arrays of objects, by index) into dotted paths. Other arrays, like
+/// One step in a path: an object key or an array index.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Seg {
+    Key(String),
+    Index(usize),
+}
+
+/// A path kept as segments, so a key containing `.` can't collide with a nested path.
+type Path = Vec<Seg>;
+
+/// Flatten objects (and arrays of objects, by index) into paths. Other arrays, like
 /// `required` or `enum`, stay whole: comparing them as one value reads better than by index.
-fn flatten(value: &Value, path: String, out: &mut BTreeMap<String, Value>) {
+fn flatten(value: &Value, path: Path, out: &mut BTreeMap<Path, Value>) {
     match value {
         Value::Object(map) if !map.is_empty() => {
             for (key, val) in map {
-                let child = if path.is_empty() {
-                    key.clone()
-                } else {
-                    format!("{path}.{key}")
-                };
+                let mut child = path.clone();
+                child.push(Seg::Key(key.clone()));
                 flatten(val, child, out);
             }
         }
         Value::Array(items) if items.iter().any(Value::is_object) => {
             for (i, val) in items.iter().enumerate() {
-                flatten(val, format!("{path}[{i}]"), out);
+                let mut child = path.clone();
+                child.push(Seg::Index(i));
+                flatten(val, child, out);
             }
         }
         leaf => {
             out.insert(path, leaf.clone());
         }
     }
+}
+
+/// `a.b[0]` for plain keys; keys that aren't simple identifiers are written `["k.e y"]`
+/// (JSON-quoted, invisible characters escaped) so the printed path is unambiguous.
+fn display_path(path: &[Seg]) -> String {
+    let mut out = String::new();
+    for seg in path {
+        match seg {
+            Seg::Index(i) => out.push_str(&format!("[{i}]")),
+            Seg::Key(k) if is_simple_key(k) => {
+                if !out.is_empty() {
+                    out.push('.');
+                }
+                out.push_str(k);
+            }
+            Seg::Key(k) => out.push_str(&format!("[{}]", show(&Value::String(k.clone())))),
+        }
+    }
+    out
+}
+
+fn is_simple_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '-')
 }
 
 /// Word-level diff of two strings. Consecutive changes of one kind are grouped into a
@@ -235,6 +271,20 @@ mod tests {
              + inputSchema.properties.token.type: \"string\"\n\
              ~ inputSchema.required: [\"path\"] → []\n"
         );
+    }
+
+    #[test]
+    fn keys_containing_dots_do_not_collide_with_nested_paths() {
+        // Issue #5: `"path.description"` and `path` -> `description` used to flatten to the
+        // same string, so one change could hide the other.
+        let old = json!({"p": {"path": {"description": "a"}, "path.description": "b"}});
+        let new = json!({"p": {"path": {"description": "a"}, "path.description": "EVIL"}});
+        let out = render(Some(&old), Some(&new), false);
+        assert_eq!(out, "~ p[\"path.description\"]\n    [-b-]{+EVIL+}\n");
+
+        let new = json!({"p": {"path": {"description": "EVIL"}, "path.description": "b"}});
+        let out = render(Some(&old), Some(&new), false);
+        assert_eq!(out, "~ p.path.description\n    [-a-]{+EVIL+}\n");
     }
 
     #[test]
