@@ -39,7 +39,7 @@ pub fn canonicalize(value: &Value) -> Value {
 }
 
 /// NFC-normalize and unify line endings. Never trims or collapses whitespace.
-fn normalize_str(s: &str) -> String {
+pub fn normalize_str(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\r', "\n").nfc().collect()
 }
 
