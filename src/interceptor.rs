@@ -35,8 +35,9 @@ pub struct Interceptor {
     /// This server's approved tools: `Ok(None)` if the server isn't in the lockfile,
     /// `Err` if the lockfile couldn't be read (then every tool is hidden).
     lock: Result<Option<ServerEntry>, String>,
-    /// Shown to the user on how to approve, e.g. `mcp-lock approve -- npx server`.
-    approve_hint: String,
+    /// The CLI arguments that identify this server, e.g. `--lock mcp.lock -- npx server`,
+    /// used to tell the user the exact `diff` / `approve` command to run.
+    cli_args: String,
     /// Ids (as JSON text, so `1` and `"1"` differ) of client `tools/list` requests in flight.
     pending_lists: HashSet<String>,
     /// Tools the client may call: ones that passed the most recent `tools/list` check.
@@ -47,17 +48,22 @@ pub struct Interceptor {
 
 impl Interceptor {
     /// Create the interceptor for one server session.
-    pub fn new(lock: Result<Option<ServerEntry>, String>, approve_hint: String) -> Self {
+    ///
+    /// `cli_args` is what follows the subcommand when running `mcp-lock` for this server,
+    /// e.g. `--lock mcp.lock -- npx server`.
+    pub fn new(lock: Result<Option<ServerEntry>, String>, cli_args: String) -> Self {
         match &lock {
-            Err(e) => tracing::error!("{e}; hiding all tools until this is fixed"),
+            Err(e) => tracing::error!(
+                "{e}; hiding all tools until this is fixed (check with: mcp-lock status {cli_args})"
+            ),
             Ok(None) => tracing::warn!(
-                "server is not in the lockfile; all its tools are hidden. Approve with: {approve_hint}"
+                "server is not in the lockfile; all its tools are hidden. Approve with: mcp-lock approve {cli_args}"
             ),
             Ok(Some(_)) => {}
         }
         Self {
             lock,
-            approve_hint,
+            cli_args,
             pending_lists: HashSet::new(),
             allowed: HashSet::new(),
             blocked: HashMap::new(),
@@ -105,9 +111,9 @@ impl Interceptor {
             .blocked
             .get(name)
             .map_or("it is not in the approved tool list", String::as_str);
+        let args = &self.cli_args;
         let message = format!(
-            "mcp-lock blocked tool `{name}`: {reason}. Review with `mcp-lock status`, then approve with: {}",
-            self.approve_hint
+            "mcp-lock blocked tool `{name}`: {reason}.              See what changed: `mcp-lock diff --tool {name} {args}`.              Approve it: `mcp-lock approve --tool {name} {args}`"
         );
         tracing::warn!("{message}");
         match msg.get("id") {
@@ -166,7 +172,10 @@ impl Interceptor {
             };
             let reasons = verdict.reasons.join("; ");
             if verdict.severity.hides() {
-                tracing::warn!("hiding tool `{name}`: {reasons}");
+                tracing::warn!(
+                    "hiding tool `{name}`: {reasons} (see: mcp-lock diff --tool {name} {})",
+                    self.cli_args
+                );
                 self.allowed.remove(name);
                 self.blocked.insert(name.to_owned(), reasons);
             } else {

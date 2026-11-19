@@ -4,6 +4,7 @@
 pub mod canonical;
 pub mod classify;
 pub mod client;
+pub mod diff;
 pub mod fingerprint;
 pub mod interceptor;
 pub mod lockfile;
