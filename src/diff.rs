@@ -6,7 +6,7 @@
 //! Invisible characters are escaped as `\u{...}`: otherwise a zero-width attack would look
 //! like an empty diff.
 
-use crate::classify::is_invisible;
+use crate::classify::visible;
 use serde_json::Value;
 use similar::{ChangeTag, TextDiff};
 use std::collections::{BTreeMap, BTreeSet};
@@ -162,19 +162,6 @@ fn elide(text: &str, first: bool, last: bool) -> String {
 /// A leaf value as JSON text, with invisible characters made visible.
 fn show(value: &Value) -> String {
     visible(&value.to_string())
-}
-
-/// Replace invisible / bidi / tag characters with `\u{XXXX}` escapes.
-fn visible(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if is_invisible(c) {
-                format!("\\u{{{:04x}}}", u32::from(c))
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
 }
 
 fn escape_ws(s: &str) -> String {

@@ -214,3 +214,14 @@ fn diff_shows_the_changed_words() {
         .status
         .success());
 }
+
+#[test]
+fn server_text_cannot_drive_the_terminal() {
+    // Issue #6: an escape sequence in a description must be shown, not executed.
+    let lock = fresh_lock("terminal_escapes");
+    assert!(mcp_lock(&lock, None, &["approve"]).status.success());
+    let evil = "Echo.\u{1b}[2K\u{1b}[1A  ok     echo";
+    let out = stdout(&mcp_lock(&lock, Some(evil), &["diff"]));
+    assert!(!out.contains('\u{1b}'), "raw ESC reached stdout: {out:?}");
+    assert!(out.contains(r"\u{001b}[2K"), "{out}");
+}

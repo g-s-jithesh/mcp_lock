@@ -113,10 +113,13 @@ fn compare(old: &Value, new: &Value, verdict: &mut Verdict) {
             other => verdict.push(Severity::Block, format!("`{other}` changed")),
         }
     }
-    if count_invisible(new) > count_invisible(old) {
+    // Compare the characters themselves, not a count: swapping one invisible character for
+    // another (e.g. a zero-width space for a right-to-left override) must be flagged too.
+    let new_invisible = invisible_chars(new);
+    if !new_invisible.is_empty() && new_invisible != invisible_chars(old) {
         verdict.push(
             Severity::Block,
-            "zero-width or bidi control characters added",
+            "zero-width or bidi control characters added or changed",
         );
     }
 }
@@ -228,32 +231,56 @@ fn string_set(value: &Value) -> BTreeSet<String> {
         .collect()
 }
 
-/// Characters that are invisible or reorder text, where hidden instructions can live.
+/// Characters that are invisible, reorder text, or control a terminal: places where hidden
+/// instructions can live, and things we must never print raw. `\n` and `\t` are allowed.
 pub fn is_invisible(c: char) -> bool {
-    matches!(c,
-        '\u{061C}'                    // Arabic letter mark
-        | '\u{180E}'                  // Mongolian vowel separator
-        | '\u{200B}'..='\u{200F}'     // zero-width space/joiners, LRM, RLM
-        | '\u{202A}'..='\u{202E}'     // bidi embeddings and overrides
-        | '\u{2060}'..='\u{2064}'     // word joiner, invisible operators
-        | '\u{2066}'..='\u{2069}'     // bidi isolates
-        | '\u{FEFF}'                  // zero-width no-break space / BOM
-        | '\u{E0000}'..='\u{E007F}' // tag characters ("ASCII smuggling")
-    )
+    (c.is_control() && c != '\n' && c != '\t') // C0, DEL, C1 (ESC, CSI, backspace, ...)
+        || matches!(c,
+            '\u{00AD}'                    // soft hyphen
+            | '\u{034F}'                  // combining grapheme joiner
+            | '\u{061C}'                  // Arabic letter mark
+            | '\u{115F}' | '\u{1160}'     // Hangul choseong/jungseong fillers
+            | '\u{17B4}' | '\u{17B5}'     // Khmer inherent vowels
+            | '\u{180B}'..='\u{180F}'     // Mongolian variation selectors, vowel separator
+            | '\u{200B}'..='\u{200F}'     // zero-width space/joiners, LRM, RLM
+            | '\u{2028}' | '\u{2029}'     // line / paragraph separators
+            | '\u{202A}'..='\u{202E}'     // bidi embeddings and overrides
+            | '\u{2060}'..='\u{206F}'     // word joiner, invisible operators, isolates, ...
+            | '\u{3164}' | '\u{FFA0}'     // Hangul fillers
+            | '\u{FE00}'..='\u{FE0F}'     // variation selectors
+            | '\u{FEFF}'                  // zero-width no-break space / BOM
+            | '\u{FFF9}'..='\u{FFFB}'     // interlinear annotation
+            | '\u{E0000}'..='\u{E007F}'   // tag characters ("ASCII smuggling")
+            | '\u{E0100}'..='\u{E01EF}' // variation selectors supplement
+        )
 }
 
-/// Count invisible characters in every string and key of `value`.
-pub fn count_invisible(value: &Value) -> usize {
-    let in_str = |s: &str| s.chars().filter(|c| is_invisible(*c)).count();
+/// Every invisible character in `value`'s strings and keys, in a stable order.
+fn invisible_chars(value: &Value) -> Vec<char> {
+    let in_str = |s: &str| s.chars().filter(|c| is_invisible(*c)).collect::<Vec<_>>();
     match value {
         Value::String(s) => in_str(s),
-        Value::Array(items) => items.iter().map(count_invisible).sum(),
+        Value::Array(items) => items.iter().flat_map(invisible_chars).collect(),
         Value::Object(map) => map
             .iter()
-            .map(|(k, v)| in_str(k) + count_invisible(v))
-            .sum(),
-        _ => 0,
+            .flat_map(|(k, v)| in_str(k).into_iter().chain(invisible_chars(v)))
+            .collect(),
+        _ => Vec::new(),
     }
+}
+
+/// Make `s` safe to show: every [`is_invisible`] character becomes a `\u{XXXX}` escape,
+/// so terminals can't be driven by server text and hidden characters can be seen.
+pub fn visible(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if is_invisible(c) {
+                format!("\\u{{{:04x}}}", u32::from(c))
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -452,6 +479,48 @@ mod tests {
             t["inputSchema"]["properties"]["x"] = json!({"description": "\u{E0049}\u{E0047}"})
         });
         assert_block(&v, "zero-width or bidi");
+    }
+
+    #[test]
+    fn invisible_set_covers_controls_and_format_characters() {
+        // Issue #6.2: terminal controls, variation selectors, fillers and friends.
+        for c in [
+            '\u{1b}',
+            '\u{08}',
+            '\u{7f}',
+            '\u{9b}',
+            '\u{AD}',
+            '\u{34F}',
+            '\u{115F}',
+            '\u{3164}',
+            '\u{FE0F}',
+            '\u{E0101}',
+            '\u{FFF9}',
+            '\u{2028}',
+            '\u{206F}',
+        ] {
+            assert!(is_invisible(c), "U+{:04X}", u32::from(c));
+        }
+        for c in ['\n', '\t', ' ', 'a', '\u{e9}', '\u{301}'] {
+            assert!(!is_invisible(c), "U+{:04X}", u32::from(c));
+        }
+    }
+
+    #[test]
+    fn swapped_invisible_characters_are_flagged() {
+        // Issue #6.3: same count, different characters.
+        let old = json!({"name": "t", "description": "a\u{200b}b"});
+        let new = json!({"name": "t", "description": "a\u{202e}b"});
+        assert_block(&classify(Some(&old), Some(&new)), "zero-width or bidi");
+    }
+
+    #[test]
+    fn visible_escapes_invisible_and_control_characters() {
+        assert_eq!(
+            visible("ok\u{1b}[2Jgone\u{200b}"),
+            r"ok\u{001b}[2Jgone\u{200b}"
+        );
+        assert_eq!(visible("line\nnext\ttab"), "line\nnext\ttab");
     }
 
     #[test]

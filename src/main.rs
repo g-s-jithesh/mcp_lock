@@ -1,6 +1,6 @@
 use anyhow::{bail, Context};
 use clap::{Args, Parser, Subcommand};
-use mcp_lock::classify::{check, Severity};
+use mcp_lock::classify::{check, visible, Severity};
 use mcp_lock::fingerprint::{fingerprint_tools, Pinned};
 use mcp_lock::interceptor::Interceptor;
 use mcp_lock::lockfile::{self, Lockfile};
@@ -105,11 +105,15 @@ async fn status(args: ServerArgs) -> anyhow::Result<ExitCode> {
 
     println!("{label} ({id})");
     for (name, verdict) in &verdicts {
-        let tag = tag(verdict.severity);
+        // Tool names and reasons come from the server: escape them before printing.
+        let (tag, name) = (tag(verdict.severity), visible(name));
         if verdict.reasons.is_empty() {
             println!("  {tag:<6} {name}");
         } else {
-            println!("  {tag:<6} {name}: {}", verdict.reasons.join("; "));
+            println!(
+                "  {tag:<6} {name}: {}",
+                visible(&verdict.reasons.join("; "))
+            );
         }
     }
     Ok(exit_code(
@@ -147,12 +151,13 @@ async fn diff(args: ServerArgs, only: Option<&str>) -> anyhow::Result<ExitCode> 
             .map(|t| &t.definition);
         let new = current.get(*name).map(|p| &p.definition);
         let header = if verdict.reasons.is_empty() {
-            format!("{name} [{}]", tag(verdict.severity))
+            format!("{} [{}]", visible(name), tag(verdict.severity))
         } else {
             format!(
-                "{name} [{}: {}]",
+                "{} [{}: {}]",
+                visible(name),
                 tag(verdict.severity),
-                verdict.reasons.join("; ")
+                visible(&verdict.reasons.join("; "))
             )
         };
         println!(
@@ -217,7 +222,8 @@ async fn snapshot(server: &[String]) -> anyhow::Result<(String, BTreeMap<String,
     let _ = timeout(EXIT_TIMEOUT, transport.wait()).await;
 
     let pinned = fingerprint_tools(&snap.tools)?;
-    let label = snap.server_name.unwrap_or_else(|| server[0].clone());
+    // The label is server-supplied and gets printed: escape it once here.
+    let label = visible(&snap.server_name.unwrap_or_else(|| server[0].clone()));
     Ok((label, pinned))
 }
 
