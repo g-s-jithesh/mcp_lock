@@ -1,5 +1,8 @@
 # mcp-lock
 
+[![CI](https://github.com/g-s-jithesh/mcp_lock/actions/workflows/ci.yml/badge.svg)](https://github.com/g-s-jithesh/mcp_lock/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **A lockfile for MCP tools.** `mcp-lock` is a small proxy that sits between your MCP client
 (Claude Code, Cursor, …) and an MCP server. It pins every tool's definition in `mcp.lock`, and
 if a server later changes a tool in a way that could change what your agent does, the proxy
@@ -7,8 +10,10 @@ hides that tool and blocks calls to it until you re-approve it.
 
 Think `package-lock.json`, but for the tools your agent can call.
 
-> Status: early. Stdio servers work end to end; HTTP transport, CI and releases
-> are still to come (see [Roadmap](#roadmap)).
+![mcp-lock approving a server, detecting a rewritten tool description, and showing the diff](docs/demo.gif)
+
+> Status: early (0.1). Stdio servers work end to end and are tested on Linux, macOS and
+> Windows; Streamable HTTP is still to come (see [Roadmap](#roadmap)).
 
 ## Why
 
@@ -49,11 +54,14 @@ how to re-approve. If `mcp.lock` is unreadable, `mcp-lock` fails closed and hide
 
 ## Install
 
-Requires a Rust toolchain (stable).
+Requires a Rust toolchain (stable, via [rustup](https://rustup.rs)).
 
 ```bash
 cargo install --git https://github.com/g-s-jithesh/mcp_lock
+mcp-lock --version
 ```
+
+This puts a single `mcp-lock` binary in `~/.cargo/bin`.
 
 ## Usage
 
@@ -159,7 +167,7 @@ on:
 - **Canonicalization + severity classification**: fewer false alarms than hashing raw bytes,
   while still catching real attacks.
 - **A measurable benchmark** ([above](#benchmark)): detection rate vs false-alarm rate on an attack corpus.
-- **A small, transport-agnostic Rust core**, shipped as a single static binary.
+- **A small, transport-agnostic Rust core**, shipped as a single binary.
 
 ## Roadmap
 
@@ -169,7 +177,8 @@ on:
 - [x] Classify + enforce
 - [x] `mcp-lock diff`: readable, coloured diff of what changed
 - [x] Benchmark: attack corpus, detection and false-alarm rates
-- [ ] CI, demo, release binaries
+- [x] CI, demo, `cargo install`
+- [ ] Prebuilt release binaries
 - [ ] Streamable HTTP transport
 
 ## Development
@@ -180,3 +189,10 @@ cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
 
 Integration tests use a small fake MCP server (`tests/fake_server.py`), so they need Python 3
 on `PATH`. See [`CLAUDE.md`](CLAUDE.md) for architecture and contribution rules.
+
+To regenerate the demo GIF from real command output: `cargo build --release && python scripts/demo.py`
+(needs Pillow).
+
+## License
+
+[MIT](LICENSE)
