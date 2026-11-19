@@ -6,6 +6,7 @@
 //! - `tools/call` requests: reject calls to anything not allowed by the latest list;
 //! - `notifications/tools/list_changed`: forwarded; the client's next list is re-checked.
 
+use crate::canonical::normalize_str;
 use crate::classify::{check, Severity};
 use crate::fingerprint::fingerprint_tools;
 use crate::lockfile::ServerEntry;
@@ -44,6 +45,17 @@ pub struct Interceptor {
     allowed: HashSet<String>,
     /// Why each hidden tool was hidden.
     blocked: HashMap<String, String>,
+    /// The `tools/list` listing in progress, while its pages arrive.
+    listing: Option<Listing>,
+}
+
+/// State of one (possibly paginated) `tools/list` listing.
+#[derive(Default)]
+struct Listing {
+    /// Normalized name -> name as sent, for every tool on the pages so far.
+    seen: HashMap<String, String>,
+    /// Tools that passed the check on the pages so far.
+    kept: HashSet<String>,
 }
 
 impl Interceptor {
@@ -67,6 +79,7 @@ impl Interceptor {
             pending_lists: HashSet::new(),
             allowed: HashSet::new(),
             blocked: HashMap::new(),
+            listing: None,
         }
     }
 
@@ -79,6 +92,10 @@ impl Interceptor {
             Some("tools/list") => {
                 if let Some(id) = msg.get("id") {
                     self.pending_lists.insert(id_key(id));
+                }
+                // A request without a cursor starts a new listing.
+                if msg["params"]["cursor"].is_null() {
+                    self.listing = None;
                 }
                 Action::Forward
             }
@@ -186,7 +203,11 @@ impl Interceptor {
         }
     }
 
-    /// Check every tool in a `tools/list` response; drop the ones that must be hidden.
+    /// Check every tool in one `tools/list` page; drop the ones that must be hidden.
+    ///
+    /// Pages belong to the listing in progress. When the last page arrives (no
+    /// `nextCursor`), `allowed` becomes exactly the tools kept across the whole listing,
+    /// so tools the server stopped listing can no longer be called.
     fn filter_list(&mut self, msg: &Value) -> Action {
         let Some(tools) = msg["result"]["tools"].as_array() else {
             return Action::Forward; // an error response, or nothing we understand to hide
@@ -196,6 +217,7 @@ impl Interceptor {
             (_, Err(e)) => return self.hide_all(msg, tools, &e.to_string()),
             (Ok(entry), Ok(current)) => check(entry.as_ref(), &current),
         };
+        let mut listing = self.listing.take().unwrap_or_default();
 
         let mut kept = Vec::with_capacity(tools.len());
         for tool in tools {
@@ -204,8 +226,18 @@ impl Interceptor {
             let Some(verdict) = verdicts.get(name) else {
                 continue;
             };
-            let reasons = verdict.reasons.join("; ");
-            if verdict.severity.hides() {
+            let mut reasons = verdict.reasons.join("; ");
+            let mut hide = verdict.severity.hides();
+            // A name seen on an earlier page: the client could pick either copy.
+            if let Some(earlier) = listing.seen.insert(normalize_str(name), name.to_owned()) {
+                tracing::warn!("tool `{name}` appears on more than one page; hiding it");
+                listing.kept.remove(&earlier);
+                self.allowed.remove(&earlier);
+                reasons = "duplicate tool name across tools/list pages".to_owned();
+                self.blocked.insert(earlier, reasons.clone());
+                hide = true;
+            }
+            if hide {
                 tracing::warn!(
                     "hiding tool `{name}`: {reasons} (see: mcp-lock diff --tool {name} {})",
                     self.cli_args
@@ -218,14 +250,15 @@ impl Interceptor {
                 }
                 self.blocked.remove(name);
                 self.allowed.insert(name.to_owned());
+                listing.kept.insert(name.to_owned());
                 kept.push(tool.clone());
             }
         }
-        // Verdicts for locked tools the server no longer lists ("removed": logged only).
-        for (name, verdict) in &verdicts {
-            if !tools.iter().any(|t| t["name"] == name.as_str()) {
-                tracing::warn!("tool `{name}`: {}", verdict.reasons.join("; "));
-            }
+
+        if has_more_pages(&msg["result"]["nextCursor"]) {
+            self.listing = Some(listing);
+        } else {
+            self.finish_listing(&listing);
         }
 
         if kept.len() == tools.len() {
@@ -235,13 +268,37 @@ impl Interceptor {
         }
     }
 
+    /// The last page arrived: only tools kept in this listing stay callable, and locked tools
+    /// the server no longer lists are logged as removed.
+    fn finish_listing(&mut self, listing: &Listing) {
+        self.allowed.retain(|name| listing.kept.contains(name));
+        if let Ok(Some(entry)) = &self.lock {
+            let listed: HashSet<&String> = listing.seen.values().collect();
+            for name in entry.tools.keys().filter(|n| !listed.contains(n)) {
+                tracing::warn!("tool `{name}`: removed by server");
+            }
+        }
+    }
+
     fn hide_all(&mut self, msg: &Value, tools: &[Value], reason: &str) -> Action {
-        tracing::error!("hiding all {} tools: {reason}", tools.len());
+        tracing::error!("hiding all tools: {reason}");
+        // Revoke everything, including tools allowed by earlier lists or pages.
+        self.allowed.clear();
+        self.listing = None;
         for name in tools.iter().filter_map(|t| t["name"].as_str()) {
-            self.allowed.remove(name);
             self.blocked.insert(name.to_owned(), reason.to_owned());
         }
         Action::Replace(with_tools(msg, Vec::new()))
+    }
+}
+
+/// Whether a `nextCursor` value means another page follows. Missing, `null` and `""` all end
+/// the listing (JavaScript clients treat an empty cursor as falsy).
+fn has_more_pages(cursor: &Value) -> bool {
+    match cursor {
+        Value::Null => false,
+        Value::String(s) => !s.is_empty(),
+        _ => true,
     }
 }
 
@@ -420,6 +477,79 @@ mod tests {
             i.on_server(&batch),
             Action::Replace(json!([ping, list_response(1, &[])]))
         );
+    }
+
+    fn list_page(
+        i: &mut Interceptor,
+        id: i64,
+        cursor: Option<&str>,
+        next: Option<&str>,
+        tools: &[Value],
+    ) -> Action {
+        let mut req = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list"});
+        if let Some(c) = cursor {
+            req["params"] = json!({ "cursor": c });
+        }
+        i.on_client(&req);
+        let mut resp = list_response(id, tools);
+        if let Some(n) = next {
+            resp["result"]["nextCursor"] = json!(n);
+        }
+        i.on_server(&resp)
+    }
+
+    fn named(name: &str, description: &str) -> Value {
+        json!({"name": name, "description": description, "inputSchema": {"type": "object"}})
+    }
+
+    #[test]
+    fn tools_removed_from_a_later_list_are_no_longer_callable() {
+        // Issue #7.1
+        let tools = [named("echo", "Echo."), named("ping", "Ping.")];
+        let mut i = Interceptor::new(Ok(approved(&tools)), "hint".into());
+        list(&mut i, 1, &tools);
+        assert_eq!(i.on_client(&call(2, "ping")), Action::Forward);
+        list(&mut i, 3, &tools[..1]);
+        assert!(rejected(&i.on_client(&call(4, "ping"))));
+    }
+
+    #[test]
+    fn hide_all_revokes_every_tool() {
+        // Issue #7.2: a bad list (duplicate names) must revoke tools from earlier lists too.
+        let tools = [named("echo", "Echo."), named("ping", "Ping.")];
+        let mut i = Interceptor::new(Ok(approved(&tools)), "hint".into());
+        list(&mut i, 1, &tools);
+        list(&mut i, 2, &[named("ping", "Ping."), named("ping", "Evil.")]);
+        assert!(rejected(&i.on_client(&call(3, "echo"))));
+    }
+
+    #[test]
+    fn paginated_lists_are_checked_as_one_listing() {
+        // Issue #7.3
+        let tools = [named("echo", "Echo."), named("ping", "Ping.")];
+        let mut i = Interceptor::new(Ok(approved(&tools)), "hint".into());
+        assert_eq!(
+            list_page(&mut i, 1, None, Some("p2"), &tools[..1]),
+            Action::Forward
+        );
+        assert_eq!(
+            list_page(&mut i, 2, Some("p2"), None, &tools[1..]),
+            Action::Forward
+        );
+        assert_eq!(i.on_client(&call(3, "echo")), Action::Forward);
+        assert_eq!(i.on_client(&call(4, "ping")), Action::Forward);
+    }
+
+    #[test]
+    fn duplicate_names_across_pages_are_hidden() {
+        let tools = [named("echo", "Echo.")];
+        let mut i = Interceptor::new(Ok(approved(&tools)), "hint".into());
+        list_page(&mut i, 1, None, Some("p2"), &tools);
+        let page2 = list_page(&mut i, 2, Some("p2"), None, &[named("echo", "Echo.")]);
+        let mut expected = list_response(2, &[]);
+        expected["result"]["tools"] = json!([]);
+        assert_eq!(page2, Action::Replace(expected));
+        assert!(rejected(&i.on_client(&call(3, "echo"))));
     }
 
     #[test]
