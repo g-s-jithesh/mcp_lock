@@ -87,9 +87,14 @@ async fn main() -> anyhow::Result<ExitCode> {
                 tokio::io::stdout(),
             )
             .await?;
-            let status = transport.wait().await?;
+            // The server already had DRAIN_TIMEOUT to exit after the client left. If it still
+            // hasn't, the timeout drops `transport`, and `kill_on_drop` stops the child.
+            let Ok(status) = timeout(EXIT_TIMEOUT, transport.wait()).await else {
+                tracing::warn!("server did not exit; killed it");
+                return Ok(ExitCode::FAILURE);
+            };
             // Propagate the server's exit code; 1 if it was killed by a signal.
-            Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
+            Ok(ExitCode::from(status?.code().unwrap_or(1) as u8))
         }
         Cmd::Status(args) => status(args).await,
         Cmd::Diff { tool, server } => diff(server, tool.as_deref()).await,

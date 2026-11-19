@@ -225,3 +225,41 @@ fn server_text_cannot_drive_the_terminal() {
     assert!(!out.contains('\u{1b}'), "raw ESC reached stdout: {out:?}");
     assert!(out.contains(r"\u{001b}[2K"), "{out}");
 }
+
+#[test]
+fn run_exits_even_if_the_server_ignores_stdin_eof() {
+    // Issue #9: the proxy must not hang forever on a server that never exits.
+    let lock = fresh_lock("ignore_eof");
+    assert!(mcp_lock(&lock, None, &["approve"]).status.success());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mcp-lock"))
+        .args(["run", "--lock"])
+        .arg(&lock)
+        .args(["--", python()])
+        .arg(format!(
+            "{}/tests/fake_server.py",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .env("FAKE_IGNORE_EOF", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn run");
+    drop(child.stdin.take()); // client goes away
+
+    let start = std::time::Instant::now();
+    let exited = loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            break true;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(20) {
+            let _ = child.kill();
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert!(
+        exited,
+        "mcp-lock run still running 20s after the client closed stdin"
+    );
+}

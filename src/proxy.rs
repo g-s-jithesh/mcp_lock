@@ -9,7 +9,12 @@ use crate::transport::{
 };
 use serde_json::Value;
 use std::io;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::time::Instant;
+
+/// How long the server may keep running after the client closes its input.
+pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Pump messages between a client (`client_in`/`client_out`) and `server` until the
 /// server closes. When the client closes its side, the server's input is closed too and
@@ -28,6 +33,10 @@ where
     let mut from_client = LineReader::new(client_in, MAX_MESSAGE_BYTES);
     let (to_client, client_writer) = line_writer(client_out, MAX_QUEUED_BYTES);
     let mut client_open = true;
+    // Once the client is gone, the server gets this long to finish (issue #9). The far
+    // future is just a placeholder while the client is still connected.
+    let drain = tokio::time::sleep(Duration::from_secs(365 * 24 * 3600));
+    tokio::pin!(drain); // `select!` polls it by reference, so it must not move
 
     loop {
         // `select!` waits on both sides at once and runs the branch that's ready first.
@@ -44,7 +53,15 @@ where
                     tracing::debug!("client closed input; closing server input");
                     client_open = false;
                     server.close();
+                    drain.as_mut().reset(Instant::now() + DRAIN_TIMEOUT);
                 }
+            },
+            () = &mut drain, if !client_open => {
+                tracing::warn!(
+                    "server still running {}s after the client left; stopping it",
+                    DRAIN_TIMEOUT.as_secs()
+                );
+                break;
             },
             msg = server.recv() => match msg? {
                 Some(msg) => match decide(&msg, |v| interceptor.on_server(v)) {

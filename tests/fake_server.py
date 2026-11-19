@@ -58,3 +58,9 @@ for line in sys.stdin:
     print("fake-server handled", msg.get("method"), file=sys.stderr)
     sys.stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
     sys.stdout.flush()
+
+# A misbehaving server that keeps running after its stdin closes (issue #9).
+if os.environ.get("FAKE_IGNORE_EOF"):
+    import time
+
+    time.sleep(30)  # long enough to outlast the proxy's drain timeout; short if a test fails
