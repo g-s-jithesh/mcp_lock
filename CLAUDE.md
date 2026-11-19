@@ -107,8 +107,8 @@ Hash a normalized form, not raw bytes:
 | Change | Severity | Default action |
 |---|---|---|
 | Key reorder, formatting only | None | Silent |
-| New optional parameter with no text (no `description`/`title`/`default`/`examples`) | Warn | Allow, log on stderr |
-| New optional parameter that carries text | Block | Hide + reject calls |
+| New optional parameter that is purely structural (identifier name ≤ 32 chars; only `type`, numeric/length/item bounds, boolean `additionalProperties`/`uniqueItems`, structural `items`) | Warn | Allow, log on stderr |
+| Any other new optional parameter (description, enum, const, pattern, format, nested properties, vendor keys, sentence-like name, …) | Block | Hide + reject calls |
 | New tool not in lock | New | Hidden until approved |
 | Description text changed | Block | Hide + reject calls |
 | Constraint removed/loosened (`required`, `enum`, `maxLength`, `pattern`, type widened) | Block | Hide + reject calls |
