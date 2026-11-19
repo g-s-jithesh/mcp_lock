@@ -1,0 +1,13 @@
+[package]
+name = "mcp-lock"
+version = "0.1.0"
+edition = "2021"
+description = "Lockfile for MCP tool definitions: detect and block tool rug pulls"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "macros", "io-std", "io-util", "process", "sync"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
