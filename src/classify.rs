@@ -110,7 +110,7 @@ fn compare(old: &Value, new: &Value, verdict: &mut Verdict) {
             "description" => verdict.push(Severity::Block, "description changed"),
             "annotations" => compare_annotations(o, n, verdict),
             "inputSchema" => compare_input_schema(o, n, verdict),
-            other => verdict.push(Severity::Block, format!("`{other}` changed")),
+            other => verdict.push(Severity::Block, format!("`{}` changed", field(other))),
         }
     }
     // Compare the characters themselves, not a count: swapping one invisible character for
@@ -130,7 +130,10 @@ fn compare_annotations(old: Option<&Value>, new: Option<&Value>, verdict: &mut V
     let new = new.and_then(Value::as_object).unwrap_or(&empty);
     let keys: BTreeSet<&String> = old.keys().chain(new.keys()).collect();
     for key in keys.into_iter().filter(|k| old.get(*k) != new.get(*k)) {
-        verdict.push(Severity::Block, format!("annotation `{key}` changed"));
+        verdict.push(
+            Severity::Block,
+            format!("annotation `{}` changed", field(key)),
+        );
     }
 }
 
@@ -155,16 +158,25 @@ fn compare_input_schema(old: Option<&Value>, new: Option<&Value>, verdict: &mut 
         for name in &added {
             let schema = props.remove(name).unwrap_or(Value::Null);
             if required.contains(name) {
-                verdict.push(Severity::Block, format!("new required parameter `{name}`"));
+                verdict.push(
+                    Severity::Block,
+                    format!("new required parameter `{}`", field(name)),
+                );
             } else if !is_plain_name(name) || !is_structural(&schema) {
                 // The model reads parameter names, descriptions, enums, patterns, ...:
                 // any of them can carry instructions.
                 verdict.push(
                     Severity::Block,
-                    format!("new optional parameter `{name}` carries text the model reads"),
+                    format!(
+                        "new optional parameter `{}` carries text the model reads",
+                        field(name)
+                    ),
                 );
             } else {
-                verdict.push(Severity::Warn, format!("new optional parameter `{name}`"));
+                verdict.push(
+                    Severity::Warn,
+                    format!("new optional parameter `{}`", field(name)),
+                );
             }
         }
     }
@@ -267,6 +279,21 @@ fn invisible_chars(value: &Value) -> Vec<char> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Make server text safe to quote back to a person *or a model*: at most `max` characters
+/// (with `…` if cut), invisible characters escaped. Long text can't smuggle instructions.
+pub fn bounded(s: &str, max: usize) -> String {
+    let mut out: String = s.chars().take(max).collect();
+    if s.chars().nth(max).is_some() {
+        out.push('…');
+    }
+    visible(&out)
+}
+
+/// A server-supplied key or parameter name, as quoted inside a reason.
+fn field(name: &str) -> String {
+    bounded(name, 40)
 }
 
 /// Make `s` safe to show: every [`is_invisible`] character becomes a `\u{XXXX}` escape,

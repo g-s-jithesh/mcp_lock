@@ -49,8 +49,10 @@ Canonicalization (sorted keys, sorted `required`/`enum`, Unicode NFC, `\n` line 
 harmless reformatting doesn't raise alarms, while whitespace and invisible characters inside
 text are deliberately *kept*, because that's where hidden instructions live.
 
-A blocked call never reaches the server: the client gets a JSON-RPC error explaining why and
-how to re-approve. If `mcp.lock` is unreadable, `mcp-lock` fails closed and hides every tool.
+A blocked call never reaches the server: the client gets a short JSON-RPC error saying the
+tool changed and a person must review it. The exact `diff` and `approve` commands go to stderr
+for you, never to the model: an agent with a shell must not be able to approve a tool itself.
+If `mcp.lock` is unreadable, `mcp-lock` fails closed and hides every tool.
 
 ## Install
 
@@ -126,7 +128,7 @@ In Claude Code, run `claude --debug` to see them.
 | Server connects but shows **0 tools** | Server not approved, or approved with a different command line | Run `mcp-lock status -- <exact same command>`; approve with that exact command |
 | **0 tools** and `mcp-lock status` says "not a valid lockfile" | `mcp.lock` was edited and is no longer valid JSON | Fix it (the error gives line and column) or `git checkout mcp.lock` |
 | One tool missing | It changed since approval | `mcp-lock diff --tool <name> -- <command>`, then approve if the change is fine |
-| A call fails with "mcp-lock blocked tool" | Same as above | The error message contains the exact `diff` and `approve` commands |
+| A call fails with "mcp-lock blocked tool" | Same as above | The proxy's stderr (`claude --debug`) has the exact `diff` and `approve` commands |
 | Lockfile path ends up mangled on Windows | Git Bash ate the backslashes | Use forward slashes: `--lock C:/path/to/mcp.lock` |
 
 ## Benchmark
