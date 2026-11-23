@@ -36,6 +36,11 @@ if os.environ.get("FAKE_NO_TOOLS"):
 
 def result(method, params):
     if method == "initialize":
+        # A slow server, so tests can overlap two runs deterministically.
+        if os.environ.get("FAKE_INIT_DELAY"):
+            import time
+
+            time.sleep(float(os.environ["FAKE_INIT_DELAY"]))
         return {
             "protocolVersion": params.get("protocolVersion", "2025-06-18"),
             "capabilities": {"tools": {"listChanged": True}},

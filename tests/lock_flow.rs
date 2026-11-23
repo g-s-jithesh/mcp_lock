@@ -285,3 +285,36 @@ fn status_fails_for_a_server_that_was_never_approved_even_with_no_tools() {
         stdout(&out)
     );
 }
+
+#[test]
+fn concurrent_approves_for_different_servers_keep_both() {
+    // Two approvals overlap: the slow one used to save the lockfile it loaded before the
+    // fast one finished, silently dropping the fast one's server.
+    let lock = fresh_lock("concurrent_approve");
+    let start = |extra_arg: &str, delay: &str| {
+        Command::new(env!("CARGO_BIN_EXE_mcp-lock"))
+            .args(["approve", "--lock"])
+            .arg(&lock)
+            .args(["--", python()])
+            .arg(format!(
+                "{}/tests/fake_server.py",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .arg(extra_arg) // a different command line is a different server
+            .env("FAKE_INIT_DELAY", delay)
+            .env_remove("FAKE_DESCRIPTION")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn approve")
+    };
+    let mut slow = start("slow", "2");
+    let mut fast = start("fast", "0.2");
+    assert!(fast.wait().expect("wait").success());
+    assert!(slow.wait().expect("wait").success());
+
+    let text = std::fs::read_to_string(&lock).expect("lockfile written");
+    let saved: Value = serde_json::from_str(&text).expect("lockfile is JSON");
+    let servers = saved["servers"].as_object().map_or(0, |s| s.len());
+    assert_eq!(servers, 2, "one approval was lost:\n{text}");
+}

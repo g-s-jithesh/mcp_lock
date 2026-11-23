@@ -227,10 +227,15 @@ fn exit_code(clean: bool) -> ExitCode {
 }
 
 async fn approve(args: ServerArgs, only: Option<&str>) -> anyhow::Result<ExitCode> {
-    // Load first: if the lockfile is corrupt, refuse rather than overwrite it.
-    let mut lock = Lockfile::load(&args.lock)?;
+    // Check first: if the lockfile is corrupt, refuse before even starting the server.
+    Lockfile::load(&args.lock)?;
     let (label, current) = snapshot(&args.server).await?;
     let id = lockfile::server_id(&args.server);
+    // Re-read just before writing: the server can take seconds to answer, and another
+    // `approve` may have saved in the meantime. Saving a copy loaded earlier would drop it.
+    // ponytail: a millisecond window remains between this load and the save; take a
+    // `File::lock` on a sidecar file if concurrent approves ever need to be airtight.
+    let mut lock = Lockfile::load(&args.lock)?;
     lock.approve(&id, &label, &current, only, &lockfile::now_utc())?;
     lock.save(&args.lock)?;
     let count = only.map_or(current.len(), |_| 1);
