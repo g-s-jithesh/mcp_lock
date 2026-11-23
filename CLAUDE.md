@@ -20,7 +20,7 @@ Our focus, and the thing worth getting right:
 1. **Canonicalization + severity classification**: fewer false alarms than raw hashing, while
    still catching real attacks.
 2. **A measurable benchmark**: detection rate vs false-alarm rate against an attack corpus.
-3. **Clean Rust architecture**: transport-agnostic interceptor, single static binary.
+3. **Clean Rust architecture**: transport-agnostic interceptor, single binary.
 
 ## Tech stack
 
@@ -63,18 +63,25 @@ src/
   main.rs            # CLI parsing only; calls into lib
   lib.rs
   transport/
-    mod.rs           # `Transport` trait
+    mod.rs           # `Transport` trait; bounded line reader/writer shared by both sides
     stdio.rs         # spawn child process, newline-delimited JSON-RPC over stdin/stdout
     http.rs          # (later) Streamable HTTP
+  proxy.rs           # pumps client <-> server, asking the interceptor about each message
   interceptor.rs     # inspects JSON-RPC messages; transport-agnostic
+  client.rs          # minimal MCP client used by approve/status/diff (lists tools only)
   canonical.rs       # normalize tool definitions before hashing
   fingerprint.rs     # SHA-256 over canonical form
   classify.rs        # compare old vs new definition -> Severity
+  diff.rs            # human-readable field-by-field diff for `mcp-lock diff`
   lockfile.rs        # read/write mcp.lock (atomic writes)
-  policy.rs          # what to do for each Severity
 tests/
-  fixtures/          # recorded tools/list responses + attack variants
+  fixtures/          # recorded tools/list responses + attack/benign corpus
+examples/
+  benchmark.rs       # detection vs false-alarm rates per policy
 ```
+
+The policy is a single method for now, `Severity::hides()`. A separate `policy.rs` was planned
+but not needed; add it when there is more than one policy to choose at runtime.
 
 ### Hard rules
 
