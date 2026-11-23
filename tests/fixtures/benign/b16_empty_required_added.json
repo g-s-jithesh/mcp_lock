@@ -1,0 +1,21 @@
+{
+  "kind": "benign",
+  "technique": "Schema library upgrade starts emitting an empty required list",
+  "before": {
+    "name": "list_allowed_directories",
+    "description": "List the directories this server is allowed to access.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  "after": {
+    "name": "list_allowed_directories",
+    "description": "List the directories this server is allowed to access.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    }
+  }
+}

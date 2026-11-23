@@ -122,18 +122,50 @@ fn compare(old: &Value, new: &Value, verdict: &mut Verdict) {
             "zero-width or bidi control characters added or changed",
         );
     }
+    // Safety net: the definitions differ, so some reason must be recorded. Without one,
+    // `check()` would misreport the change as a hand-edited lockfile. Fail closed.
+    if verdict.reasons.is_empty() {
+        verdict.push(Severity::Block, "definition changed");
+    }
 }
 
+/// `annotations` as a map: missing counts as `{}` (`empty`); a value that isn't an object is
+/// `None`, a change we can't reason about.
+//
+// A named function rather than a closure: the explicit `'a` says the returned reference
+// borrows from `value` or `empty`, which closure lifetime inference can't express.
+fn as_map<'a>(
+    value: Option<&'a Value>,
+    empty: &'a serde_json::Map<String, Value>,
+) -> Option<&'a serde_json::Map<String, Value>> {
+    match value {
+        None => Some(empty),
+        Some(Value::Object(map)) => Some(map),
+        Some(_) => None,
+    }
+}
+
+/// Called only when the two `annotations` values differ.
 fn compare_annotations(old: Option<&Value>, new: Option<&Value>, verdict: &mut Verdict) {
     let empty = serde_json::Map::new();
-    let old = old.and_then(Value::as_object).unwrap_or(&empty);
-    let new = new.and_then(Value::as_object).unwrap_or(&empty);
+    let (Some(old), Some(new)) = (as_map(old, &empty), as_map(new, &empty)) else {
+        verdict.push(Severity::Block, "`annotations` changed");
+        return;
+    };
     let keys: BTreeSet<&String> = old.keys().chain(new.keys()).collect();
-    for key in keys.into_iter().filter(|k| old.get(*k) != new.get(*k)) {
+    let changed: Vec<&String> = keys
+        .into_iter()
+        .filter(|k| old.get(*k) != new.get(*k))
+        .collect();
+    for key in &changed {
         verdict.push(
             Severity::Block,
             format!("annotation `{}` changed", field(key)),
         );
+    }
+    if changed.is_empty() {
+        // The values differ but no key does: `{}` appeared or disappeared.
+        verdict.push(Severity::Warn, "empty `annotations` added or removed");
     }
 }
 
@@ -183,22 +215,32 @@ fn compare_input_schema(old: Option<&Value>, new: Option<&Value>, verdict: &mut 
     if let Some(req) = stripped.get_mut("required").and_then(Value::as_array_mut) {
         req.retain(|r| !r.as_str().is_some_and(|r| added.iter().any(|a| a == r)));
     }
-    // Don't count an emptied container as a change if the old schema never had it.
-    for key in ["properties", "required"] {
-        let emptied = match &stripped[key] {
-            Value::Object(m) => m.is_empty(),
-            Value::Array(a) => a.is_empty(),
-            _ => false,
-        };
-        if emptied && old.get(key).is_none() {
-            if let Some(obj) = stripped.as_object_mut() {
-                obj.remove(key);
-            }
-        }
-    }
-    if stripped != old {
+    // An empty `properties` or `required` means the same as none, so compare without them.
+    if without_empty_containers(&stripped) != without_empty_containers(&old) {
         verdict.push(Severity::Block, "input schema constraints changed");
+    } else if added.is_empty() {
+        // We're only called when the schemas differ, so an empty container came or went.
+        verdict.push(
+            Severity::Warn,
+            "empty `properties` or `required` added or removed",
+        );
     }
+}
+
+/// `schema` without `properties: {}` and `required: []`, which constrain nothing.
+fn without_empty_containers(schema: &Value) -> Value {
+    let mut out = schema.clone();
+    if let Some(obj) = out.as_object_mut() {
+        obj.retain(|key, v| {
+            let empty = match v {
+                Value::Object(m) => m.is_empty(),
+                Value::Array(a) => a.is_empty(),
+                _ => false,
+            };
+            !(empty && (key == "properties" || key == "required"))
+        });
+    }
+    out
 }
 
 /// A parameter name that can't carry a sentence: an identifier of at most 32 characters.
@@ -548,6 +590,38 @@ mod tests {
             r"ok\u{001b}[2Jgone\u{200b}"
         );
         assert_eq!(visible("line\nnext\ttab"), "line\nnext\ttab");
+    }
+
+    #[test]
+    fn empty_containers_appearing_or_disappearing_only_warn() {
+        // `"required": []` means the same as no `required`; schema libraries switch between
+        // the two across versions. It used to block with a misleading "hash does not match".
+        let bare = json!({"name": "t", "inputSchema": {"type": "object"}});
+        let with_empty = json!({"name": "t", "inputSchema": {
+            "type": "object", "properties": {}, "required": []
+        }, "annotations": {}});
+        for (old, new) in [(&bare, &with_empty), (&with_empty, &bare)] {
+            let v = classify(Some(old), Some(new));
+            assert_eq!(v.severity, Severity::Warn, "{v:?}");
+            assert!(v.reasons.iter().all(|r| r.contains("empty")), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn hash_mismatch_message_is_only_for_real_tampering() {
+        use crate::fingerprint::fingerprint_tools;
+        use crate::lockfile::Lockfile;
+        let bare = json!({"name": "t", "inputSchema": {"type": "object"}});
+        let mut lock = Lockfile::default();
+        let approved = fingerprint_tools(&[bare]).expect("valid");
+        lock.approve("id", "s", &approved, None, "t")
+            .expect("approve");
+        let current = fingerprint_tools(&[json!({"name": "t", "inputSchema": {
+            "type": "object", "required": []
+        }})])
+        .expect("valid");
+        let v = &check(lock.servers.get("id"), &current)["t"];
+        assert!(!v.reasons.iter().any(|r| r.contains("hash")), "{v:?}");
     }
 
     #[test]
