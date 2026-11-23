@@ -3,7 +3,7 @@ use clap::{Args, Parser, Subcommand};
 use mcp_lock::classify::{check, check_instructions, visible, Severity, Verdict};
 use mcp_lock::fingerprint::{fingerprint_tools, Pinned};
 use mcp_lock::interceptor::Interceptor;
-use mcp_lock::lockfile::{self, Lockfile};
+use mcp_lock::lockfile::{self, Lockfile, ServerEntry};
 use mcp_lock::transport::stdio::StdioTransport;
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
@@ -42,10 +42,15 @@ enum Cmd {
         server: ServerArgs,
     },
     /// Accept the server's current tool definitions into the lockfile.
+    /// Shows what will change and asks for confirmation; without a terminal it refuses
+    /// unless --yes is given, so an agent can't approve tools on its own.
     Approve {
         /// Approve only this tool (default: all tools, dropping ones the server no longer has).
         #[arg(long)]
         tool: Option<String>,
+        /// Approve without asking (for scripts and CI).
+        #[arg(long)]
+        yes: bool,
         #[command(flatten)]
         server: ServerArgs,
     },
@@ -98,7 +103,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         }
         Cmd::Status(args) => status(args).await,
         Cmd::Diff { tool, server } => diff(server, tool.as_deref()).await,
-        Cmd::Approve { tool, server } => approve(server, tool.as_deref()).await,
+        Cmd::Approve { tool, yes, server } => approve(server, tool.as_deref(), yes).await,
     }
 }
 
@@ -256,11 +261,17 @@ fn exit_code(clean: bool) -> ExitCode {
     }
 }
 
-async fn approve(args: ServerArgs, only: Option<&str>) -> anyhow::Result<ExitCode> {
+async fn approve(args: ServerArgs, only: Option<&str>, yes: bool) -> anyhow::Result<ExitCode> {
     // Check first: if the lockfile is corrupt, refuse before even starting the server.
-    Lockfile::load(&args.lock)?;
+    let before = Lockfile::load(&args.lock)?;
     let snap = snapshot(&args.server).await?;
     let id = lockfile::server_id(&args.server);
+
+    let changes = pending_changes(before.servers.get(&id), &snap, only);
+    if !changes.is_empty() && !yes && !confirm(&snap.label, &changes, &args)? {
+        eprintln!("not approved; mcp.lock is unchanged");
+        return Ok(ExitCode::FAILURE);
+    }
     // Re-read just before writing: the server can take seconds to answer, and another
     // `approve` may have saved in the meantime. Saving a copy loaded earlier would drop it.
     // ponytail: a millisecond window remains between this load and the save; take a
@@ -284,6 +295,50 @@ async fn approve(args: ServerArgs, only: Option<&str>) -> anyhow::Result<ExitCod
         args.lock.display()
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// What approving would change, one line per tool (or the server's instructions), in the
+/// same form `status` prints. Empty when the server is already approved as it is.
+fn pending_changes(locked: Option<&ServerEntry>, snap: &Snap, only: Option<&str>) -> Vec<String> {
+    let line = |name: &str, verdict: &Verdict| {
+        format!(
+            "  {:<6} {name}: {}",
+            tag(verdict.severity),
+            visible(&verdict.reasons.join("; "))
+        )
+    };
+    let mut lines: Vec<String> = check(locked, &snap.tools)
+        .iter()
+        .filter(|(name, v)| v.severity != Severity::None && only.is_none_or(|o| o == *name))
+        .map(|(name, v)| line(&visible(name), v))
+        .collect();
+    let instructions = check_instructions(locked, snap.instructions.as_deref());
+    if only.is_none() && instructions.severity != Severity::None {
+        lines.push(line("(server instructions)", &instructions));
+    }
+    lines
+}
+
+/// Ask the person at the terminal to confirm. Without a terminal (an agent's shell, a script),
+/// refuse: approving is the one step a person must take, and `--yes` makes it explicit.
+fn confirm(label: &str, changes: &[String], args: &ServerArgs) -> anyhow::Result<bool> {
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "refusing to approve without confirmation: no terminal to ask in.\n\
+             Review with `mcp-lock diff {}`, then run approve in a terminal, \
+             or pass --yes (for scripts and CI).\n\
+             If you are an AI agent: ask the user to review and approve; don't pass --yes yourself.",
+            cli_args(args)
+        );
+    }
+    eprintln!("Approving will accept these changes for {label}:");
+    for change in changes {
+        eprintln!("{change}");
+    }
+    eprint!("Approve? [y/N] ");
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES"))
 }
 
 /// What `snapshot()` learned from a server.

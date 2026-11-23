@@ -76,7 +76,7 @@ This puts a single `mcp-lock` binary in `~/.cargo/bin`.
 ## Usage
 
 ```bash
-# 1. Approve a server's current tools (writes ./mcp.lock)
+# 1. Approve a server's current tools (shows them, asks y/N, writes ./mcp.lock)
 mcp-lock approve -- npx -y @modelcontextprotocol/server-filesystem .
 
 # 2. Check for drift at any time (exit code 1 if anything changed; handy in CI)
@@ -101,6 +101,10 @@ read_text_file [BLOCK: annotation `readOnlyHint` changed; description changed]
 
 `[-removed-]` and `{+added+}` markers are always shown; colour is added when stdout is a
 terminal (set `NO_COLOR` to turn it off).
+
+`approve` always asks a person: it lists what it will accept and waits for `y`. Without a
+terminal (an agent's shell, a script) it refuses unless you pass `--yes`, so an AI agent can't
+quietly approve a changed tool for itself. Use `--yes` in CI and scripts.
 
 Every command takes `--lock <path>` (default `mcp.lock`). The server is identified by its exact
 command line, so use the same command in `approve`, `status` and your client config.
@@ -138,6 +142,7 @@ In Claude Code, run `claude --debug` to see them.
 | One tool missing | It changed since approval | `mcp-lock diff --tool <name> -- <command>`, then approve if the change is fine |
 | A call fails with "mcp-lock blocked tool" | Same as above | The proxy's stderr (`claude --debug`) has the exact `diff` and `approve` commands |
 | Lockfile path ends up mangled on Windows | Git Bash ate the backslashes | Use forward slashes: `--lock C:/path/to/mcp.lock` |
+| `approve` says "refusing to approve without confirmation" | No terminal to ask in (e.g. Claude Code's `!` shell, CI) | Review with `mcp-lock diff`, then add `--yes` |
 
 ## Benchmark
 

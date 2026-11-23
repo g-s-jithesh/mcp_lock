@@ -262,11 +262,15 @@ mod tests {
             text.find("\"approved_at\"") < text.find("\"hash\""),
             "keys sorted"
         );
+        // Only this test's temp file: other tests save into the same directory in parallel.
         let leftovers = std::fs::read_dir(path.parent().expect("dir"))
             .expect("list")
             .filter(|e| {
-                e.as_ref()
-                    .is_ok_and(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+                e.as_ref().is_ok_and(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("roundtrip.lock.tmp-")
+                })
             })
             .count();
         assert_eq!(leftovers, 0);

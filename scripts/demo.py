@@ -105,8 +105,8 @@ def main():
     cmd = "-- python demo_server.py"
 
     s.type("# 1. Approve an MCP server's tools once (writes mcp.lock)")
-    s.type(f"$ mcp-lock approve {cmd}")
-    s.show(run(binary, args.python, cwd, ["approve"]), 1200)
+    s.type(f"$ mcp-lock approve --yes {cmd}")
+    s.show(run(binary, args.python, cwd, ["approve", "--yes"]), 1200)
     s.type(f"$ mcp-lock status {cmd}")
     s.show(run(binary, args.python, cwd, ["status"]) + [""], 1800)
 

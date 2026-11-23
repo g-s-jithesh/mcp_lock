@@ -47,7 +47,8 @@ Run `cargo fmt && cargo clippy -- -D warnings && cargo test` before declaring an
 ```
 mcp-lock run [--lock mcp.lock] -- <server command> [args...]   # proxy mode (stdio)
 mcp-lock status [--lock mcp.lock] -- <server command>          # show drift, change nothing
-mcp-lock approve [--tool <name>] -- <server command>           # accept current definitions
+mcp-lock approve [--tool <name>] [--yes] -- <server command>   # accept current definitions
+                                                               # (asks y/N; no terminal -> needs --yes)
 mcp-lock diff --tool <name> -- <server command>                # human-readable diff
 ```
 

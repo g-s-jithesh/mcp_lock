@@ -62,9 +62,10 @@ fn proxied_session_is_byte_identical_to_direct() {
     std::fs::create_dir_all(&dir).expect("temp dir");
     let lock = dir.join("mcp.lock");
     let _ = std::fs::remove_file(&lock);
-    let mcp_lock = |subcommand: &str| {
+    let mcp_lock = |subcommand: &[&str]| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_mcp-lock"));
-        cmd.args([subcommand, "--lock"])
+        cmd.args(subcommand)
+            .arg("--lock")
             .arg(&lock)
             .args(["--", python()])
             .arg(fake_server())
@@ -72,14 +73,17 @@ fn proxied_session_is_byte_identical_to_direct() {
         cmd
     };
     // "No drift" means the server's tools are approved first.
-    assert!(mcp_lock("approve").status().expect("approve").success());
+    assert!(mcp_lock(&["approve", "--yes"])
+        .status()
+        .expect("approve")
+        .success());
 
     let direct = run_session(
         Command::new(python())
             .arg(fake_server())
             .env_remove("FAKE_DESCRIPTION"),
     );
-    let proxied = run_session(&mut mcp_lock("run"));
+    let proxied = run_session(&mut mcp_lock(&["run"]));
 
     assert!(direct.status.success(), "fake server failed: {direct:?}");
     assert!(proxied.status.success(), "proxy failed: {proxied:?}");
