@@ -316,7 +316,7 @@ fn has_more_pages(cursor: &Value) -> bool {
 
 /// Key for matching a response id to a request id the way JavaScript clients do:
 /// numbers by value (`1` == `1.0` == `1e0`), strings by text, and never `1` == `"1"`.
-fn id_key(id: &Value) -> String {
+pub(crate) fn id_key(id: &Value) -> String {
     match id {
         Value::Number(n) => n
             .as_f64()

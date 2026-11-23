@@ -1,6 +1,7 @@
 //! A minimal MCP client, used by `status` and `approve` to ask a server what tools it has.
 //! It never calls tools: it only sends `initialize` and `tools/list`.
 
+use crate::interceptor::id_key;
 use crate::transport::Transport;
 use serde_json::{json, Value};
 use std::io;
@@ -11,6 +12,9 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// Stop following `nextCursor` after this many pages, in case a server loops forever.
 const MAX_PAGES: u32 = 100;
+
+/// JSON-RPC "method not found".
+const METHOD_NOT_FOUND: i64 = -32601;
 
 /// What a server advertised.
 #[derive(Debug)]
@@ -101,8 +105,16 @@ async fn request<T: Transport>(
             tracing::debug!("skipping non-JSON line from server");
             continue;
         };
-        // A response has our id and no `method` (a request from the server could reuse ids).
-        if msg["id"] != json!(id) || msg.get("method").is_some() {
+        // A string `method` means a request or notification *from* the server. Answer
+        // requests, so a server that waits for a reply doesn't stall us until the timeout.
+        if let Some(server_method) = msg["method"].as_str() {
+            if let Some(server_id) = msg.get("id") {
+                answer_server_request(transport, server_id, server_method)?;
+            }
+            continue;
+        }
+        // Otherwise it's a response; match ids the way the proxy does (1 == 1.0).
+        if id_key(&msg["id"]) != id_key(&json!(id)) {
             continue;
         }
         if let Some(error) = msg.get("error") {
@@ -115,32 +127,107 @@ async fn request<T: Transport>(
     }
 }
 
+/// Reply to a request the server sent us. We only list tools, so we answer `ping` and turn
+/// everything else (roots, sampling, elicitation, ...) down with "method not found".
+fn answer_server_request<T: Transport>(
+    transport: &mut T,
+    id: &Value,
+    method: &str,
+) -> io::Result<()> {
+    let reply = if method == "ping" {
+        json!({"jsonrpc": "2.0", "id": id, "result": {}})
+    } else {
+        json!({"jsonrpc": "2.0", "id": id, "error": {
+            "code": METHOD_NOT_FOUND,
+            "message": "mcp-lock only lists tools and does not support this request",
+        }})
+    };
+    send(transport, reply)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::VecDeque;
 
-    /// Replies with canned responses in order, ignoring what is sent.
-    struct Scripted(VecDeque<Value>);
+    /// Replies with canned messages in order, and records what the client sends.
+    struct Scripted {
+        replies: VecDeque<Value>,
+        sent: Vec<Value>,
+    }
+
+    impl Scripted {
+        fn new(replies: impl IntoIterator<Item = Value>) -> Self {
+            Self {
+                replies: replies.into_iter().collect(),
+                sent: Vec::new(),
+            }
+        }
+    }
 
     impl Transport for Scripted {
-        fn send(&mut self, _msg: Vec<u8>) -> io::Result<()> {
+        fn send(&mut self, msg: Vec<u8>) -> io::Result<()> {
+            self.sent
+                .push(serde_json::from_slice(&msg).map_err(io::Error::other)?);
             Ok(())
         }
         async fn recv(&mut self) -> io::Result<Option<Vec<u8>>> {
-            Ok(self.0.pop_front().map(|v| v.to_string().into_bytes()))
+            Ok(self.replies.pop_front().map(|v| v.to_string().into_bytes()))
         }
         fn close(&mut self) {}
+    }
+
+    fn init_ok(id: Value) -> Value {
+        json!({"jsonrpc": "2.0", "id": id, "result": {"serverInfo": {"name": "s"}}})
+    }
+
+    fn one_page(id: Value) -> Value {
+        json!({"jsonrpc": "2.0", "id": id, "result": {"tools": [{"name": "a"}]}})
     }
 
     #[tokio::test]
     async fn empty_next_cursor_ends_the_listing() {
         // Issue #12.2: `""` used to be followed as a cursor, looping until TooManyPages.
-        let mut server = Scripted(VecDeque::from([
-            json!({"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {"name": "s"}}}),
+        let mut server = Scripted::new([
+            init_ok(json!(1)),
             json!({"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "a"}], "nextCursor": ""}}),
-        ]));
+        ]);
         let snapshot = list_tools(&mut server).await.expect("one page");
         assert_eq!(snapshot.tools.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ids_match_by_value_and_method_null_is_a_response() {
+        // Same rules as the proxy's interceptor: 1.0 is id 1; `"method": null` is absent.
+        let mut page = one_page(json!(2.0));
+        page["method"] = Value::Null;
+        let mut server = Scripted::new([init_ok(json!(1.0)), page]);
+        let snapshot = list_tools(&mut server).await.expect("listed");
+        assert_eq!(snapshot.tools.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn requests_from_the_server_are_answered() {
+        // A server may ping, or ask for roots, before it answers us. Unanswered, it would
+        // wait until our 60 s timeout.
+        let mut server = Scripted::new([
+            json!({"jsonrpc": "2.0", "id": "p1", "method": "ping"}),
+            json!({"jsonrpc": "2.0", "id": 7, "method": "roots/list"}),
+            json!({"jsonrpc": "2.0", "method": "notifications/message", "params": {}}),
+            init_ok(json!(1)),
+            one_page(json!(2)),
+        ]);
+        list_tools(&mut server).await.expect("listed");
+        let reply_to = |id: Value| server.sent.iter().find(|m| m["id"] == id).cloned();
+        assert_eq!(
+            reply_to(json!("p1")).map(|m| m["result"].clone()),
+            Some(json!({}))
+        );
+        assert_eq!(
+            reply_to(json!(7)).map(|m| m["error"]["code"].clone()),
+            Some(json!(-32601))
+        );
+        // Nothing is sent in reply to a notification.
+        assert_eq!(server.sent.len(), 5, "{:?}", server.sent);
     }
 }
