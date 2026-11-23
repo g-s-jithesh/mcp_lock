@@ -1,6 +1,6 @@
 use anyhow::{bail, Context};
 use clap::{Args, Parser, Subcommand};
-use mcp_lock::classify::{check, visible, Severity};
+use mcp_lock::classify::{check, check_instructions, visible, Severity, Verdict};
 use mcp_lock::fingerprint::{fingerprint_tools, Pinned};
 use mcp_lock::interceptor::Interceptor;
 use mcp_lock::lockfile::{self, Lockfile};
@@ -104,12 +104,13 @@ async fn main() -> anyhow::Result<ExitCode> {
 
 async fn status(args: ServerArgs) -> anyhow::Result<ExitCode> {
     let lock = Lockfile::load(&args.lock)?;
-    let (label, current) = snapshot(&args.server).await?;
+    let snap = snapshot(&args.server).await?;
     let id = lockfile::server_id(&args.server);
     let locked = lock.servers.get(&id);
-    let verdicts = check(locked, &current);
+    let verdicts = check(locked, &snap.tools);
+    let instructions = check_instructions(locked, snap.instructions.as_deref());
 
-    println!("{label} ({id})");
+    println!("{} ({id})", snap.label);
     if locked.is_none() {
         print_not_approved(&args);
     }
@@ -125,18 +126,34 @@ async fn status(args: ServerArgs) -> anyhow::Result<ExitCode> {
             );
         }
     }
+    if instructions.severity != Severity::None {
+        println!(
+            "  {:<6} (server instructions): {}",
+            tag(instructions.severity),
+            visible(&instructions.reasons.join("; "))
+        );
+    }
     // A server that was never approved is drift, even if it has no tools right now.
     Ok(exit_code(
-        locked.is_some() && verdicts.values().all(|v| v.severity == Severity::None),
+        locked.is_some()
+            && instructions.severity == Severity::None
+            && verdicts.values().all(|v| v.severity == Severity::None),
     ))
 }
 
 async fn diff(args: ServerArgs, only: Option<&str>) -> anyhow::Result<ExitCode> {
     let lock = Lockfile::load(&args.lock)?;
-    let (_, current) = snapshot(&args.server).await?;
+    let snap = snapshot(&args.server).await?;
+    let current = &snap.tools;
     let id = lockfile::server_id(&args.server);
     let locked = lock.servers.get(&id);
-    let verdicts = check(locked, &current);
+    let verdicts = check(locked, current);
+    // Instructions are shown when diffing the whole server, not a single tool.
+    let instructions = match only {
+        Some(_) => None,
+        None => Some(check_instructions(locked, snap.instructions.as_deref()))
+            .filter(|v| v.severity != Severity::None),
+    };
 
     let names: Vec<&String> = match only {
         Some(name) => match verdicts.get_key_value(name) {
@@ -151,44 +168,57 @@ async fn diff(args: ServerArgs, only: Option<&str>) -> anyhow::Result<ExitCode> 
     };
     if locked.is_none() {
         print_not_approved(&args);
-    } else if names.is_empty() {
+    } else if names.is_empty() && instructions.is_none() {
         println!("no changes");
     }
 
     let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    if let Some(verdict) = &instructions {
+        print_header("(server instructions)", verdict, color);
+        let as_field = |text: &str| serde_json::json!({ "instructions": text });
+        let old = locked.and_then(|e| e.instructions.as_deref()).map(as_field);
+        let new = snap.instructions.as_deref().map(as_field);
+        print!(
+            "{}",
+            mcp_lock::diff::render(old.as_ref(), new.as_ref(), color)
+        );
+        println!();
+    }
     for name in &names {
         let verdict = &verdicts[*name];
         let old = locked
             .and_then(|s| s.tools.get(*name))
             .map(|t| &t.definition);
         let new = current.get(*name).map(|p| &p.definition);
-        let header = if verdict.reasons.is_empty() {
-            format!("{} [{}]", visible(name), tag(verdict.severity))
-        } else {
-            format!(
-                "{} [{}: {}]",
-                visible(name),
-                tag(verdict.severity),
-                visible(&verdict.reasons.join("; "))
-            )
-        };
-        println!(
-            "{}",
-            if color {
-                format!("\x1b[1m{header}\x1b[0m")
-            } else {
-                header
-            }
-        );
+        print_header(&visible(name), verdict, color);
         print!("{}", mcp_lock::diff::render(old, new, color));
         println!();
     }
     Ok(exit_code(
         locked.is_some()
+            && instructions.is_none()
             && names
                 .iter()
                 .all(|n| verdicts[*n].severity == Severity::None),
     ))
+}
+
+/// `name [TAG: reasons]`, bold when colour is on. `name` must already be escaped.
+fn print_header(name: &str, verdict: &Verdict, color: bool) {
+    let header = if verdict.reasons.is_empty() {
+        format!("{name} [{}]", tag(verdict.severity))
+    } else {
+        format!(
+            "{name} [{}: {}]",
+            tag(verdict.severity),
+            visible(&verdict.reasons.join("; "))
+        )
+    };
+    if color {
+        println!("\x1b[1m{header}\x1b[0m");
+    } else {
+        println!("{header}");
+    }
 }
 
 fn print_not_approved(args: &ServerArgs) {
@@ -229,25 +259,45 @@ fn exit_code(clean: bool) -> ExitCode {
 async fn approve(args: ServerArgs, only: Option<&str>) -> anyhow::Result<ExitCode> {
     // Check first: if the lockfile is corrupt, refuse before even starting the server.
     Lockfile::load(&args.lock)?;
-    let (label, current) = snapshot(&args.server).await?;
+    let snap = snapshot(&args.server).await?;
     let id = lockfile::server_id(&args.server);
     // Re-read just before writing: the server can take seconds to answer, and another
     // `approve` may have saved in the meantime. Saving a copy loaded earlier would drop it.
     // ponytail: a millisecond window remains between this load and the save; take a
     // `File::lock` on a sidecar file if concurrent approves ever need to be airtight.
     let mut lock = Lockfile::load(&args.lock)?;
-    lock.approve(&id, &label, &current, only, &lockfile::now_utc())?;
+    lock.approve(&id, &snap.label, &snap.tools, only, &lockfile::now_utc())?;
+    // Approving one tool leaves the server's instructions as they were approved before.
+    if only.is_none() {
+        lock.approve_instructions(&id, snap.instructions.as_deref());
+    }
     lock.save(&args.lock)?;
-    let count = only.map_or(current.len(), |_| 1);
+    let count = only.map_or(snap.tools.len(), |_| 1);
+    let and_instructions = if only.is_none() && snap.instructions.is_some() {
+        " and the server's instructions"
+    } else {
+        ""
+    };
     eprintln!(
-        "approved {count} tool(s) for {label} in {}",
+        "approved {count} tool(s){and_instructions} for {} in {}",
+        snap.label,
         args.lock.display()
     );
     Ok(ExitCode::SUCCESS)
 }
 
-/// Start the server, list its tools, shut it down. Returns (label, tool name -> pinned).
-async fn snapshot(server: &[String]) -> anyhow::Result<(String, BTreeMap<String, Pinned>)> {
+/// What `snapshot()` learned from a server.
+struct Snap {
+    /// `serverInfo.name` (or the command), escaped for printing.
+    label: String,
+    /// Tool name -> fingerprint and canonical definition.
+    tools: BTreeMap<String, Pinned>,
+    /// The server's `instructions` from `initialize`, if any.
+    instructions: Option<String>,
+}
+
+/// Start the server, list its tools, shut it down.
+async fn snapshot(server: &[String]) -> anyhow::Result<Snap> {
     let mut transport = spawn(server)?;
     let snap = timeout(LIST_TIMEOUT, mcp_lock::client::list_tools(&mut transport))
         .await
@@ -255,10 +305,14 @@ async fn snapshot(server: &[String]) -> anyhow::Result<(String, BTreeMap<String,
     // If the server doesn't exit on its own, dropping the transport kills it.
     let _ = timeout(EXIT_TIMEOUT, transport.wait()).await;
 
-    let pinned = fingerprint_tools(&snap.tools)?;
+    let tools = fingerprint_tools(&snap.tools)?;
     // The label is server-supplied and gets printed: escape it once here.
     let label = visible(&snap.server_name.unwrap_or_else(|| server[0].clone()));
-    Ok((label, pinned))
+    Ok(Snap {
+        label,
+        tools,
+        instructions: snap.instructions,
+    })
 }
 
 /// The arguments that identify this server to `mcp-lock`, for hints like

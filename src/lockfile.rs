@@ -2,6 +2,7 @@
 //!
 //! Format: pretty-printed JSON with sorted keys, so it diffs cleanly in code review.
 
+use crate::canonical::normalize_str;
 use crate::fingerprint::{sha256, Pinned};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,6 +27,12 @@ pub struct Lockfile {
 pub struct ServerEntry {
     /// Human-readable name (the server's `serverInfo.name`). Not used for matching.
     pub label: String,
+    /// The server's approved `instructions` (from `initialize`), normalized like tool text.
+    /// `None`: the server had none when approved, or the lockfile predates this field.
+    // `default` lets older lockfiles without the field load; `skip_serializing_if` keeps
+    // lockfiles of servers without instructions unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
     pub tools: BTreeMap<String, ToolEntry>,
 }
 
@@ -132,6 +139,7 @@ impl Lockfile {
             .entry(id.to_owned())
             .or_insert_with(|| ServerEntry {
                 label: label.to_owned(),
+                instructions: None,
                 tools: BTreeMap::new(),
             });
         entry.label = label.to_owned();
@@ -161,6 +169,14 @@ impl Lockfile {
             }
         }
         Ok(())
+    }
+
+    /// Record the server's current `instructions` as approved (call after [`Self::approve`],
+    /// which creates the server's entry). Stored normalized, like canonical tool text.
+    pub fn approve_instructions(&mut self, id: &str, instructions: Option<&str>) {
+        if let Some(entry) = self.servers.get_mut(id) {
+            entry.instructions = instructions.map(normalize_str);
+        }
     }
 }
 
@@ -254,6 +270,36 @@ mod tests {
             })
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn instructions_round_trip_and_older_lockfiles_still_load() {
+        let mut lock = Lockfile::default();
+        lock.approve("id", "s", &pinned("Echo."), None, "t")
+            .expect("approve");
+        lock.approve_instructions("id", Some("Use echo.\r\nThanks."));
+        assert_eq!(
+            lock.servers["id"].instructions.as_deref(),
+            Some("Use echo.\nThanks."),
+            "stored normalized"
+        );
+        let path = tmp_path("instructions.lock");
+        lock.save(&path).expect("save");
+        assert_eq!(Lockfile::load(&path).expect("load"), lock);
+
+        // A lockfile written before `instructions` existed has no such field.
+        let old = tmp_path("pre-instructions.lock");
+        std::fs::write(
+            &old,
+            r#"{"servers": {"id": {"label": "s", "tools": {}}}, "version": 1}"#,
+        )
+        .expect("write");
+        let loaded = Lockfile::load(&old).expect("older lockfile loads");
+        assert_eq!(loaded.servers["id"].instructions, None);
+        // Servers without instructions don't gain a `"instructions": null` line.
+        loaded.save(&old).expect("save");
+        let text = std::fs::read_to_string(&old).expect("read");
+        assert!(!text.contains("instructions"), "{text}");
     }
 
     #[test]

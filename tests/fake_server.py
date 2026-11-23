@@ -41,11 +41,15 @@ def result(method, params):
             import time
 
             time.sleep(float(os.environ["FAKE_INIT_DELAY"]))
-        return {
+        init = {
             "protocolVersion": params.get("protocolVersion", "2025-06-18"),
             "capabilities": {"tools": {"listChanged": True}},
             "serverInfo": {"name": "fake-server", "version": "0.0.1"},
         }
+        # Server instructions reach the model too (clients add them to the prompt).
+        if os.environ.get("FAKE_INSTRUCTIONS"):
+            init["instructions"] = os.environ["FAKE_INSTRUCTIONS"]
+        return init
     if method == "tools/list":
         return {"tools": TOOLS}
     if method == "tools/call":

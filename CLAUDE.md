@@ -91,6 +91,9 @@ but not needed; add it when there is more than one policy to choose at runtime.
 2. **stdout is the protocol channel in stdio mode.** Never `println!`. All logs go to stderr
    via `tracing`. A stray print corrupts the session.
 3. **Pass through everything we don't understand**, unchanged and in order. We only act on:
+   - `initialize` responses (remove server `instructions` that don't match the lock: clients
+     put them in the model's prompt, so a server could rug-pull through them while keeping
+     every tool identical. Added 2026-11-24.)
    - `tools/list` responses (compare against lock; strip unapproved/changed tools)
    - `tools/call` requests (reject calls to blocked tools with a JSON-RPC error; do not forward)
    - `notifications/tools/list_changed` (forward, then re-check on the next `tools/list`)
@@ -123,6 +126,8 @@ Hash a normalized form, not raw bytes:
 | New required parameter | Block | Hide + reject calls |
 | Annotation changed | Block | Hide + reject calls |
 | Tool removed | Warn | Log |
+| Server `instructions` added or changed | Block | Remove them from the `initialize` response |
+| Server `instructions` removed | Warn | Log |
 | Zero-width / bidi control chars added | Block | Hide + reject calls |
 
 When unsure how to classify a change, choose **Block** and add a test case documenting it.
@@ -141,6 +146,7 @@ JSON, pretty-printed, sorted keys, committed to git so changes show up in code r
   "servers": {
     "<server id: hash of command + args, or URL>": {
       "label": "server-filesystem",
+      "instructions": "…normalized server instructions, if the server sends any…",
       "tools": {
         "read_file": {
           "hash": "sha256:…",

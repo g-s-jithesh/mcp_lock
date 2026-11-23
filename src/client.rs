@@ -23,6 +23,8 @@ pub struct Snapshot {
     pub server_name: Option<String>,
     /// Every tool from every `tools/list` page, in the order received.
     pub tools: Vec<Value>,
+    /// The server's `instructions` from the `initialize` result, if it sent a string.
+    pub instructions: Option<String>,
 }
 
 /// Why listing a server's tools failed.
@@ -77,7 +79,12 @@ pub async fn list_tools<T: Transport>(transport: &mut T) -> Result<Snapshot, Cli
             .cloned();
         if cursor.is_none() {
             let server_name = init["serverInfo"]["name"].as_str().map(str::to_owned);
-            return Ok(Snapshot { server_name, tools });
+            let instructions = init["instructions"].as_str().map(str::to_owned);
+            return Ok(Snapshot {
+                server_name,
+                tools,
+                instructions,
+            });
         }
     }
     Err(ClientError::TooManyPages)
